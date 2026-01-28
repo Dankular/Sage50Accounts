@@ -615,11 +615,214 @@ class Program
 /// Manages Sage 50 SDK detection, download, and loading
 /// Detects version from ACCDATA and downloads appropriate SDK from Sage KB
 /// </summary>
+/// <summary>
+/// Registration-free COM support using Windows Activation Contexts
+/// Allows loading COM DLLs without registering them in the registry
+/// </summary>
+static class RegFreeCom
+{
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr CreateActCtx(ref ACTCTX actctx);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool ActivateActCtx(IntPtr hActCtx, out IntPtr lpCookie);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool DeactivateActCtx(int dwFlags, IntPtr lpCookie);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern void ReleaseActCtx(IntPtr hActCtx);
+
+    [DllImport("ole32.dll")]
+    private static extern int CoCreateInstance(
+        [MarshalAs(UnmanagedType.LPStruct)] Guid rclsid,
+        IntPtr pUnkOuter,
+        uint dwClsContext,
+        [MarshalAs(UnmanagedType.LPStruct)] Guid riid,
+        out IntPtr ppv);
+
+    private const int ACTCTX_FLAG_ASSEMBLY_DIRECTORY_VALID = 0x004;
+    private const uint CLSCTX_INPROC_SERVER = 1;
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct ACTCTX
+    {
+        public int cbSize;
+        public uint dwFlags;
+        public string lpSource;
+        public ushort wProcessorArchitecture;
+        public ushort wLangId;
+        public string lpAssemblyDirectory;
+        public string lpResourceName;
+        public string lpApplicationName;
+        public IntPtr hModule;
+    }
+
+    private static IntPtr _actCtx = IntPtr.Zero;
+    private static IntPtr _cookie = IntPtr.Zero;
+    private static string? _manifestPath;
+
+    // Known CLSIDs for Sage SDO Engine
+    private static readonly Guid CLSID_SDOEngine = new("8FA9DD12-DBA0-11D1-A59B-00A0C9B18E7F");
+    private static readonly Guid IID_IDispatch = new("00020400-0000-0000-C000-000000000046");
+
+    /// <summary>
+    /// Create a manifest file for the Sage SDK DLL
+    /// </summary>
+    public static string CreateManifest(string sdkDllPath)
+    {
+        var dllDir = Path.GetDirectoryName(sdkDllPath)!;
+        var manifestPath = Path.Combine(dllDir, "SageSDO.manifest");
+
+        var manifest = $@"<?xml version=""1.0"" encoding=""UTF-8"" standalone=""yes""?>
+<assembly xmlns=""urn:schemas-microsoft-com:asm.v1"" manifestVersion=""1.0"">
+  <assemblyIdentity type=""win32"" name=""SageSDO"" version=""1.0.0.0"" />
+  <file name=""sg50SdoEngine.dll"">
+    <comClass clsid=""{{8FA9DD12-DBA0-11D1-A59B-00A0C9B18E7F}}""
+              threadingModel=""Apartment""
+              progid=""SDOEngine.32"" />
+    <typelib tlbid=""{{8FA9DD05-DBA0-11D1-A59B-00A0C9B18E7F}}""
+             version=""1.0""
+             helpdir="""" />
+  </file>
+</assembly>";
+
+        File.WriteAllText(manifestPath, manifest);
+        Console.WriteLine($"  Created manifest: {manifestPath}");
+        _manifestPath = manifestPath;
+        return manifestPath;
+    }
+
+    /// <summary>
+    /// Activate the COM context for the SDK DLL
+    /// </summary>
+    public static bool Activate(string manifestPath)
+    {
+        if (_actCtx != IntPtr.Zero)
+        {
+            Console.WriteLine("  Activation context already active");
+            return true;
+        }
+
+        var actctx = new ACTCTX
+        {
+            cbSize = Marshal.SizeOf<ACTCTX>(),
+            dwFlags = ACTCTX_FLAG_ASSEMBLY_DIRECTORY_VALID,
+            lpSource = manifestPath,
+            lpAssemblyDirectory = Path.GetDirectoryName(manifestPath)
+        };
+
+        _actCtx = CreateActCtx(ref actctx);
+        if (_actCtx == IntPtr.Zero || _actCtx == new IntPtr(-1))
+        {
+            var error = Marshal.GetLastWin32Error();
+            Console.WriteLine($"  CreateActCtx failed with error: {error}");
+            _actCtx = IntPtr.Zero;
+            return false;
+        }
+
+        if (!ActivateActCtx(_actCtx, out _cookie))
+        {
+            var error = Marshal.GetLastWin32Error();
+            Console.WriteLine($"  ActivateActCtx failed with error: {error}");
+            ReleaseActCtx(_actCtx);
+            _actCtx = IntPtr.Zero;
+            return false;
+        }
+
+        Console.WriteLine("  Activation context activated successfully");
+        return true;
+    }
+
+    /// <summary>
+    /// Create SDOEngine instance using the activation context
+    /// </summary>
+    public static object? CreateSDOEngine()
+    {
+        // Try with activation context first
+        if (_actCtx != IntPtr.Zero)
+        {
+            try
+            {
+                var hr = CoCreateInstance(CLSID_SDOEngine, IntPtr.Zero, CLSCTX_INPROC_SERVER,
+                    IID_IDispatch, out var pUnk);
+
+                if (hr == 0 && pUnk != IntPtr.Zero)
+                {
+                    var obj = Marshal.GetObjectForIUnknown(pUnk);
+                    Marshal.Release(pUnk);
+                    Console.WriteLine("  Created SDOEngine via activation context");
+                    return obj;
+                }
+                Console.WriteLine($"  CoCreateInstance returned: 0x{hr:X8}");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"  CoCreateInstance failed: {ex.Message}");
+            }
+        }
+
+        // Fallback to Type.GetTypeFromCLSID
+        try
+        {
+            var type = Type.GetTypeFromCLSID(CLSID_SDOEngine);
+            if (type != null)
+            {
+                var obj = Activator.CreateInstance(type);
+                if (obj != null)
+                {
+                    Console.WriteLine("  Created SDOEngine via CLSID");
+                    return obj;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  CLSID activation failed: {ex.Message}");
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Deactivate and release the context
+    /// </summary>
+    public static void Deactivate()
+    {
+        if (_cookie != IntPtr.Zero)
+        {
+            DeactivateActCtx(0, _cookie);
+            _cookie = IntPtr.Zero;
+        }
+
+        if (_actCtx != IntPtr.Zero)
+        {
+            ReleaseActCtx(_actCtx);
+            _actCtx = IntPtr.Zero;
+        }
+    }
+
+    /// <summary>
+    /// Check if activation context is active
+    /// </summary>
+    public static bool IsActive => _actCtx != IntPtr.Zero;
+
+    /// <summary>
+    /// Get the manifest path
+    /// </summary>
+    public static string? ManifestPath => _manifestPath;
+}
+
 static class SdkManager
 {
     private static readonly string SdkCacheDir = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
         "SageConnector", "SDK");
+
+    /// <summary>
+    /// Path to extracted SDK DLL (set after successful extraction)
+    /// </summary>
+    public static string? ExtractedSdkPath { get; private set; }
 
     /// <summary>
     /// SDK download URLs from Sage KB article 201224120012523
@@ -996,7 +1199,12 @@ static class SdkManager
             if (sdoDll != null)
             {
                 sdkPath = Path.GetDirectoryName(sdoDll);
+                ExtractedSdkPath = sdkPath;
                 Console.WriteLine($"  SDK DLLs found at: {sdkPath}");
+
+                // Create manifest for registration-free COM
+                var manifestPath = RegFreeCom.CreateManifest(sdoDll);
+                Console.WriteLine($"  SDK ready for registration-free COM");
                 return true;
             }
 
@@ -1097,22 +1305,33 @@ static class SdkManager
 
     /// <summary>
     /// Ensure SDK is available for the detected version
-    /// Downloads and installs if necessary
+    /// Downloads and extracts if necessary (no registration required)
     /// </summary>
     public static async Task<bool> EnsureSdkAsync(string accDataPath, bool force = false)
     {
         Console.WriteLine("\n[SDK Manager]");
 
-        // Check if SDK is already registered
+        // Check if SDK is already registered (can skip download)
         if (!force && IsSdkAvailable())
         {
             Console.WriteLine("  SDK already available (SDOEngine.32 registered)");
             return true;
         }
 
+        // Check if we already have extracted SDK
+        if (!force && !string.IsNullOrEmpty(ExtractedSdkPath) && Directory.Exists(ExtractedSdkPath))
+        {
+            var dllPath = Path.Combine(ExtractedSdkPath, "sg50SdoEngine.dll");
+            if (File.Exists(dllPath))
+            {
+                Console.WriteLine($"  SDK already extracted: {ExtractedSdkPath}");
+                return true;
+            }
+        }
+
         if (force)
         {
-            Console.WriteLine("  Force mode: skipping registration check");
+            Console.WriteLine("  Force mode: re-downloading SDK");
         }
 
         // Detect version from ACCDATA
@@ -1129,24 +1348,27 @@ static class SdkManager
 
         // Download SDK
         var is64Bit = Environment.Is64BitOperatingSystem;
-        var installerPath = await DownloadSdkAsync(version, is64Bit);
-        if (installerPath == null)
+        var zipPath = await DownloadSdkAsync(version, is64Bit);
+        if (zipPath == null)
             return false;
 
-        // Install SDK
-        if (!InstallSdk(installerPath))
-            return false;
-
-        // Verify installation
-        if (IsSdkAvailable())
+        // Extract SDK (no registration needed - we use reg-free COM)
+        if (!ExtractSdk(zipPath, out var sdkPath) || sdkPath == null)
         {
-            Console.WriteLine("  SDK ready for use");
-            return true;
+            Console.WriteLine("  SDK extraction failed");
+            return false;
         }
 
-        Console.WriteLine("  SDK installation completed but COM registration not detected");
-        Console.WriteLine("  You may need to restart the application");
-        return false;
+        // Verify extraction
+        var sdoDllPath = Path.Combine(sdkPath, "sg50SdoEngine.dll");
+        if (!File.Exists(sdoDllPath))
+        {
+            Console.WriteLine($"  SDK DLL not found: {sdoDllPath}");
+            return false;
+        }
+
+        Console.WriteLine("  SDK ready for registration-free COM");
+        return true;
     }
 
     /// <summary>
@@ -1174,10 +1396,11 @@ class SageConnection : IDisposable
     private dynamic? _workspaces;
     private dynamic? _workspace;
     private bool _disposed;
+    private bool _usingRegFreeCom;
 
     public SageConnection()
     {
-        // Try different Sage COM objects
+        // Try different Sage COM objects (registered)
         string[] progIds = new[]
         {
             "SDOEngine.32",
@@ -1195,31 +1418,54 @@ class SageConnection : IDisposable
             if (sdoEngineType != null)
             {
                 usedProgId = progId;
-                Console.WriteLine($"Found COM object: {progId}");
+                Console.WriteLine($"Found registered COM object: {progId}");
                 break;
             }
         }
 
+        // If no registered COM, try registration-free COM with extracted SDK
         if (sdoEngineType == null)
         {
-            throw new InvalidOperationException(
-                "No Sage SDO Engine found. Is Sage 50 installed?");
-        }
+            Console.WriteLine("No registered SDK found, trying registration-free COM...");
 
-        _sdoEngine = Activator.CreateInstance(sdoEngineType);
-        if (_sdoEngine == null)
+            if (!string.IsNullOrEmpty(SdkManager.ExtractedSdkPath))
+            {
+                var manifestPath = RegFreeCom.ManifestPath
+                    ?? Path.Combine(SdkManager.ExtractedSdkPath, "SageSDO.manifest");
+
+                if (File.Exists(manifestPath) && RegFreeCom.Activate(manifestPath))
+                {
+                    _sdoEngine = RegFreeCom.CreateSDOEngine();
+                    if (_sdoEngine != null)
+                    {
+                        _usingRegFreeCom = true;
+                        Console.WriteLine("SDO Engine created via registration-free COM.");
+                    }
+                }
+            }
+
+            if (_sdoEngine == null)
+            {
+                throw new InvalidOperationException(
+                    "No Sage SDO Engine found. Run 'sdk install <accdata_path>' first to download and extract the SDK.");
+            }
+        }
+        else
         {
-            throw new InvalidOperationException(
-                "Failed to create SDOEngine instance.");
+            _sdoEngine = Activator.CreateInstance(sdoEngineType);
+            if (_sdoEngine == null)
+            {
+                throw new InvalidOperationException(
+                    "Failed to create SDOEngine instance.");
+            }
+            Console.WriteLine($"SDO Engine created successfully (using {usedProgId}).");
         }
-
-        Console.WriteLine($"SDO Engine created successfully (using {usedProgId}).");
 
         // List available properties/methods
         try
         {
             Console.WriteLine("\nExploring SDO Engine members...");
-            var type = _sdoEngine.GetType();
+            var type = _sdoEngine!.GetType();
 
             // Try to get type info via IDispatch
             foreach (var member in type.GetMembers())
@@ -4317,6 +4563,12 @@ class SageConnection : IDisposable
         if (_sdoEngine != null)
         {
             Marshal.ReleaseComObject(_sdoEngine);
+        }
+
+        // Deactivate registration-free COM context if used
+        if (_usingRegFreeCom)
+        {
+            RegFreeCom.Deactivate();
         }
 
         _disposed = true;
