@@ -220,15 +220,15 @@ class Program
                     sage.CreateSupplierEx(sup);
                 }
 
-                var success = sage.PostPurchaseInvoice(
+                // Use TransactionPost TYPE=6 (PI) - same approach as sales invoice TYPE=1 (SI)
+                var success = sage.PostTransactionPI(
                     supplierAccount: supplierRef,
                     invoiceRef: $"PI-{DateTime.Now:yyyyMMddHHmmss}",
                     netAmount: 50.00m,
                     taxAmount: 10.00m,
-                    nominalCode: "4000",  // Sales Type A (exists in this data)
-                    details: "Test purchase invoice from SageConnector",
-                    taxCode: "T9",  // T9 required for PI per error message
-                    postToLedger: true);
+                    nominalCode: "5000",  // Cost of sales - purchase nominals start at 5xxx
+                    details: "Test purchase invoice - Belgium to GB",
+                    taxCode: "T1");
 
                 if (success)
                     Console.WriteLine("\nPurchase Invoice posted successfully!");
@@ -361,6 +361,74 @@ class Program
                     Console.WriteLine($"\nPurchase invoice {invoiceNum} posted!");
                 }
             }
+            // Test TransactionPost TYPE codes
+            else if (args.Any(a => a.Equals("testtypes", StringComparison.OrdinalIgnoreCase)))
+            {
+                Console.WriteLine("\n*** TESTING TRANSACTIONPOST TYPE VALUES ***");
+                Console.WriteLine("Avoiding TYPE 3 (SA - Sales Receipt) and TYPE 6 (PP - Purchase Payment)\n");
+
+                // Ensure FALCONLO exists as supplier
+                var testAccount = "FALCONLO";
+                if (!sage.SupplierExists(testAccount))
+                {
+                    Console.WriteLine($"Creating {testAccount} as supplier...");
+                    sage.CreateSupplierEx(new SupplierAccount
+                    {
+                        AccountRef = testAccount,
+                        Name = "Falcon Logistics",
+                        Address1 = "Test Address",
+                        Postcode = "TE5 T12"
+                    });
+                }
+
+                // Get supplier balance before tests
+                var supplierBefore = sage.GetSupplier(testAccount);
+                var customerBefore = sage.GetCustomer(testAccount);
+                Console.WriteLine($"Before: Customer Balance={customerBefore?.Balance:C}, Supplier Balance={supplierBefore?.Balance:C}");
+
+                // TransType enum: 1=SI, 2=SC, 3=SR, 4=SA, 5=SD, 6=PI, 7=PC, 8=PP, 9=PA, 10=PD
+                // Sales types (1-5), Purchase types (6-10)
+
+                Console.WriteLine("\n=== Testing SALES types (1,2) with customer account ===");
+                var salesTypes = new[] { (1, "SI", "Sales Invoice"), (2, "SC", "Sales Credit") };
+                foreach (var (typeCode, typeAbbr, typeName) in salesTypes)
+                {
+                    Console.WriteLine($"\n--- Testing TYPE={typeCode} ({typeAbbr} - {typeName}) ---");
+                    var success = sage.TestTransactionType(testAccount, typeCode, "4000", 1.00m, 0.20m);
+                    Console.WriteLine($"Result: {(success ? "SUCCESS" : "FAILED")}");
+                }
+
+                // CORRECTED TYPE VALUES FROM TransType ENUM:
+                // TYPE=6 = PI (Purchase Invoice)
+                // TYPE=7 = PC (Purchase Credit)
+                // (TYPE=4 was SA - Sales Adjustment, which is why it failed!)
+
+                Console.WriteLine("\n=== Testing CORRECT TYPE=6 (PI - Purchase Invoice) ===");
+
+                Console.WriteLine("\n--- Testing TYPE=6 (PI) with 4000 ---");
+                var success6 = sage.TestTransactionType(testAccount, 6, "4000", 1.00m, 0.00m);
+                Console.WriteLine($"Result: {(success6 ? "SUCCESS" : "FAILED")}");
+
+                // Check supplier balance after TYPE=6
+                var supplierMid = sage.GetSupplier(testAccount);
+                Console.WriteLine($"Supplier balance after TYPE=6 (PI): {supplierMid?.Balance:C}");
+
+                // Test TYPE=7 (Purchase Credit) too
+                Console.WriteLine("\n--- Testing TYPE=7 (PC - Purchase Credit) with 4000 ---");
+                var success7 = sage.TestTransactionType(testAccount, 7, "4000", 1.00m, 0.00m);
+                Console.WriteLine($"Result: {(success7 ? "SUCCESS" : "FAILED")}");
+
+                // Check supplier balance after TYPE=7
+                var supplierMid2 = sage.GetSupplier(testAccount);
+                Console.WriteLine($"Supplier balance after TYPE=7 (PC): {supplierMid2?.Balance:C}");
+
+                // Get balances after tests
+                var supplierAfter = sage.GetSupplier(testAccount);
+                var customerAfter = sage.GetCustomer(testAccount);
+                Console.WriteLine($"\nAfter: Customer Balance={customerAfter?.Balance:C}, Supplier Balance={supplierAfter?.Balance:C}");
+                Console.WriteLine($"Customer Change: {(customerAfter?.Balance ?? 0) - (customerBefore?.Balance ?? 0):C}");
+                Console.WriteLine($"Supplier Change: {(supplierAfter?.Balance ?? 0) - (supplierBefore?.Balance ?? 0):C}");
+            }
             else
             {
                 Console.WriteLine("\nCommands:");
@@ -385,6 +453,9 @@ class Program
                 Console.WriteLine("  journal  - Post journal entry");
                 Console.WriteLine("  bankpay  - Post bank payment");
                 Console.WriteLine("  bankrec  - Post bank receipt");
+                Console.WriteLine("");
+                Console.WriteLine("  Testing:");
+                Console.WriteLine("  testtypes - Test TransactionPost TYPE values");
             }
         }
         catch (COMException ex)
@@ -2365,7 +2436,7 @@ class SageConnection : IDisposable
                         {
                             var header = GetComProperty(obj, "Header");
                             if (header != null)
-                                DiscoverFields(header, $"{objName} Header", 30);
+                                DiscoverFields(header, $"{objName} Header", 70);
                         }
                         catch { }
 
@@ -2377,7 +2448,7 @@ class SageConnection : IDisposable
                             {
                                 var item = InvokeComMethod(items, "Add");
                                 if (item != null)
-                                    DiscoverFields(item, $"{objName} Item", 30);
+                                    DiscoverFields(item, $"{objName} Item", 50);
                             }
                         }
                         catch { }
@@ -2538,13 +2609,251 @@ class SageConnection : IDisposable
     }
 
     /// <summary>
+    /// Test TransactionPost with a specific TYPE value
+    /// TransType enum: 1=SI, 2=SC, 3=SR, 4=SA, 5=SD, 6=PI, 7=PC, 8=PP, 9=PA, 10=PD
+    /// </summary>
+    public bool TestTransactionType(string accountRef, int transType, string nominalCode, decimal netAmount, decimal taxAmount)
+    {
+        if (_workspace == null)
+            throw new InvalidOperationException("Not connected to Sage");
+
+        var invoiceRef = $"TEST-{transType}-{DateTime.Now:HHmmss}";
+        Console.WriteLine($"  Account: {accountRef}, Nominal: {nominalCode}, Net: {netAmount:C}");
+
+        try
+        {
+            var txPost = InvokeComMethod(_workspace, "CreateObject", "TransactionPost");
+            if (txPost == null)
+            {
+                Console.WriteLine("  TransactionPost not available");
+                return false;
+            }
+
+            var header = GetComProperty(txPost, "Header");
+            if (header == null)
+            {
+                Console.WriteLine("  ERROR: Could not get Header");
+                return false;
+            }
+
+            // Set header - same pattern as working sales invoice
+            SetFieldByName(header, "ACCOUNT_REF", accountRef);
+            SetFieldByName(header, "DATE", DateTime.Today);
+            SetFieldByName(header, "INV_REF", invoiceRef);
+            SetFieldByName(header, "DETAILS", $"Test TYPE={transType}");
+            SetFieldByName(header, "TYPE", transType);
+            SetFieldByName(header, "NET_AMOUNT", netAmount);
+            SetFieldByName(header, "TAX_AMOUNT", taxAmount);
+
+            // Set item/split
+            var items = GetComProperty(txPost, "Items");
+            if (items != null)
+            {
+                var item = InvokeComMethod(items, "Add");
+                if (item != null)
+                {
+                    SetFieldByName(item, "NOMINAL_CODE", nominalCode);
+                    SetFieldByName(item, "DETAILS", $"Test TYPE={transType}");
+                    SetFieldByName(item, "NET_AMOUNT", netAmount);
+                    SetFieldByName(item, "TAX_AMOUNT", taxAmount);
+                    // CORRECTED: Purchase types are 6-10, not 4-5
+                    // TransType enum: 6=PI, 7=PC, 8=PP, 9=PA, 10=PD
+                    int taxCode = (transType >= 6 && transType <= 10) ? 9 : 1;
+                    SetFieldByName(item, "TAX_CODE", taxCode);
+                    Console.WriteLine($"  Using TAX_CODE: T{taxCode}");
+                }
+            }
+
+            var result = InvokeComMethod(txPost, "Update");
+            if (result != null && Convert.ToBoolean(result))
+            {
+                Console.WriteLine($"  Posted: {invoiceRef}");
+                return true;
+            }
+            else
+            {
+                TryShowLastError();
+                return false;
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  Error: {ex.Message}");
+            if (ex.InnerException != null)
+                Console.WriteLine($"  Inner: {ex.InnerException.Message}");
+            TryShowLastError();
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Test TransactionPost without setting TYPE on item
+    /// </summary>
+    public bool TestTransactionTypeNoItemType(string accountRef, int transType, string nominalCode, decimal netAmount, decimal taxAmount)
+    {
+        if (_workspace == null) return false;
+
+        var invoiceRef = $"MIN-{transType}-{DateTime.Now:HHmmss}";
+        Console.WriteLine($"  Account: {accountRef}, Nominal: {nominalCode}, Net: {netAmount:C}");
+
+        try
+        {
+            var txPost = InvokeComMethod(_workspace, "CreateObject", "TransactionPost");
+            if (txPost == null) return false;
+
+            var header = GetComProperty(txPost, "Header");
+            if (header == null) return false;
+
+            // Set TYPE first
+            SetFieldByName(header, "TYPE", transType);
+            SetFieldByName(header, "ACCOUNT_REF", accountRef);
+            SetFieldByName(header, "DATE", DateTime.Today);
+            SetFieldByName(header, "INV_REF", invoiceRef);
+            SetFieldByName(header, "DETAILS", $"Minimal TYPE={transType}");
+            SetFieldByName(header, "NET_AMOUNT", netAmount);
+            SetFieldByName(header, "TAX_AMOUNT", taxAmount);
+
+            // Add item but DON'T set TYPE on item
+            var items = GetComProperty(txPost, "Items");
+            if (items != null)
+            {
+                var item = InvokeComMethod(items, "Add");
+                if (item != null)
+                {
+                    SetFieldByName(item, "NOMINAL_CODE", nominalCode);
+                    SetFieldByName(item, "NET_AMOUNT", netAmount);
+                    SetFieldByName(item, "TAX_AMOUNT", taxAmount);
+                    int taxCode = (transType == 4 || transType == 5) ? 9 : 1;
+                    SetFieldByName(item, "TAX_CODE", taxCode);
+                    // NOT setting TYPE on item
+                }
+            }
+
+            var result = InvokeComMethod(txPost, "Update");
+            if (result != null && Convert.ToBoolean(result))
+            {
+                Console.WriteLine($"  Posted: {invoiceRef}");
+                return true;
+            }
+            else
+            {
+                TryShowLastError();
+                return false;
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  Error: {ex.Message}");
+            if (ex.InnerException != null)
+                Console.WriteLine($"  Inner: {ex.InnerException.Message}");
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Post a Purchase Invoice using JournalPost with supplier linking
+    /// Alternative method using journal entries (TransactionPost TYPE=6 is preferred)
+    /// </summary>
+    public bool PostPurchaseInvoiceViaJournal(
+        string supplierAccount,
+        string invoiceRef,
+        decimal netAmount,
+        decimal taxAmount,
+        string nominalCode = "4000",
+        string details = "",
+        DateTime? date = null)
+    {
+        if (_workspace == null)
+            throw new InvalidOperationException("Not connected to Sage");
+
+        Console.WriteLine("\n[POSTING PURCHASE INVOICE VIA JOURNALPOST]");
+        Console.WriteLine($"  Supplier: {supplierAccount}");
+        Console.WriteLine($"  Invoice Ref: {invoiceRef}");
+        Console.WriteLine($"  Net: {netAmount:C}, VAT: {taxAmount:C}");
+        Console.WriteLine($"  Nominal: {nominalCode}");
+
+        try
+        {
+            var journalPost = InvokeComMethod(_workspace, "CreateObject", "JournalPost");
+            if (journalPost == null)
+            {
+                Console.WriteLine("  ERROR: Could not create JournalPost");
+                return false;
+            }
+
+            var header = GetComProperty(journalPost, "Header");
+            if (header != null)
+            {
+                SetFieldByName(header, "DATE", date ?? DateTime.Today);
+                SetFieldByName(header, "REFERENCE", invoiceRef);
+                SetFieldByName(header, "DETAILS", details);
+                // Try setting ACCOUNT_REF on header for supplier link
+                SetFieldByName(header, "ACCOUNT_REF", supplierAccount);
+                // Set TYPE=4 for Purchase Invoice
+                SetFieldByName(header, "TYPE", 4);
+            }
+
+            var items = GetComProperty(journalPost, "Items");
+            if (items != null)
+            {
+                decimal grossAmount = netAmount + taxAmount;
+
+                // Debit the expense/cost account
+                var debitItem = InvokeComMethod(items, "Add");
+                if (debitItem != null)
+                {
+                    SetFieldByName(debitItem, "NOMINAL_CODE", nominalCode);
+                    SetFieldByName(debitItem, "DETAILS", details);
+                    SetFieldByName(debitItem, "NET_AMOUNT", netAmount);
+                    SetFieldByName(debitItem, "TAX_AMOUNT", taxAmount);
+                    SetFieldByName(debitItem, "TAX_CODE", 1); // T1 standard VAT
+                    SetFieldByName(debitItem, "TYPE", 0); // Debit
+                    Console.WriteLine($"  DR {nominalCode}: {grossAmount:C}");
+                }
+
+                // Credit the creditors control account
+                var creditItem = InvokeComMethod(items, "Add");
+                if (creditItem != null)
+                {
+                    SetFieldByName(creditItem, "NOMINAL_CODE", "2100"); // Creditors Control
+                    SetFieldByName(creditItem, "DETAILS", details);
+                    SetFieldByName(creditItem, "NET_AMOUNT", grossAmount);
+                    SetFieldByName(creditItem, "TAX_CODE", 9); // T9 no VAT on control account
+                    SetFieldByName(creditItem, "TYPE", 1); // Credit
+                    // Try to link to supplier
+                    SetFieldByName(creditItem, "ACCOUNT_REF", supplierAccount);
+                    Console.WriteLine($"  CR 2100: {grossAmount:C} (supplier: {supplierAccount})");
+                }
+            }
+
+            Console.WriteLine("  Calling Update()...");
+            var result = InvokeComMethod(journalPost, "Update");
+            Console.WriteLine($"  Update result: {result}");
+
+            if (result != null && Convert.ToBoolean(result))
+            {
+                Console.WriteLine("  SUCCESS! Purchase Invoice posted via Journal");
+                return true;
+            }
+            else
+            {
+                TryShowLastError();
+                return false;
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  Error: {ex.Message}");
+            if (ex.InnerException != null)
+                Console.WriteLine($"    Inner: {ex.InnerException.Message}");
+            return false;
+        }
+    }
+
+    /// <summary>
     /// Post a Purchase Invoice using TransactionPost
-    /// TYPE=4 is Purchase Invoice (PI) in Sage transaction types
-    ///
-    /// NOTE: TransactionPost has limitations with purchase invoices:
-    /// - Accounts must exist in BOTH customer and supplier tables
-    /// - Multi-currency accounts may cause "currency mismatch" errors
-    /// - For reliable purchase posting, consider using JournalPost instead
+    /// TYPE=6 is Purchase Invoice (PI) in Sage TransType enum
+    /// Tax code T9 is required for purchase transaction types (6-10)
     /// </summary>
     public bool PostTransactionPI(
         string supplierAccount,
@@ -2584,44 +2893,36 @@ class SageConnection : IDisposable
                 return false;
             }
 
-            // Set TYPE first - this determines which account table to use
-            // TYPE=4 is Purchase Invoice (PI) - uses Supplier accounts
-            Console.WriteLine($"  Setting TYPE to 4 (PI)...");
-            SetFieldByName(header, "TYPE", 4);
-            // Verify it was set
-            var typeCheck = GetFieldByName(header, "TYPE");
-            Console.WriteLine($"  TYPE after setting: {typeCheck}");
-
-            // Now set the account reference (Sage knows to look in Suppliers table)
+            // Match EXACTLY the sales invoice structure that works
+            // Set ACCOUNT_REF first, then TYPE (like sales invoice)
             SetFieldByName(header, "ACCOUNT_REF", supplierAccount);
             SetFieldByName(header, "DATE", date ?? DateTime.Today);
             SetFieldByName(header, "INV_REF", invoiceRef);
             SetFieldByName(header, "DETAILS", string.IsNullOrEmpty(details) ? "Purchase Invoice" : details);
+            SetFieldByName(header, "TYPE", 6); // 6 = Purchase Invoice (PI) per TransType enum
 
-            // Use T9 tax code (error said "must use T9 tax code")
-            int tc = 9; // T9 = zero rated outside scope
+            // Purchase types (6-10) require T9 tax code
+            int tc = 9; // T9 required for purchase transactions
             decimal grossAmount = netAmount + taxAmount;
             SetFieldByName(header, "NET_AMOUNT", netAmount);
-            SetFieldByName(header, "TAX_AMOUNT", 0m); // No VAT for T9
+            SetFieldByName(header, "TAX_AMOUNT", taxAmount);
 
-            // Set item (split) for nominal posting
+            // Set item (split) for nominal posting - exactly like sales invoice
             var items = GetComProperty(txPost, "Items");
             if (items != null)
             {
                 var item = InvokeComMethod(items, "Add");
                 if (item != null)
                 {
-                    // Try 4001 (Sales Type B) - non-control, non-bank account
-                    SetFieldByName(item, "NOMINAL_CODE", "4001");
+                    SetFieldByName(item, "NOMINAL_CODE", nominalCode);
                     SetFieldByName(item, "DETAILS", string.IsNullOrEmpty(details) ? "Purchase Invoice" : details);
                     SetFieldByName(item, "NET_AMOUNT", netAmount);
-                    SetFieldByName(item, "TAX_AMOUNT", 0m);
-                    SetFieldByName(item, "TAX_CODE", 9);
-                    Console.WriteLine($"  Set item: Nominal=4001 (Sales Type B), Net={netAmount:C}");
+                    SetFieldByName(item, "TAX_AMOUNT", taxAmount);
+                    SetFieldByName(item, "TAX_CODE", tc);
                 }
             }
 
-            Console.WriteLine($"  Header: Account={supplierAccount}, Type=4 (PI), Gross={grossAmount:C}");
+            Console.WriteLine($"  Header: Account={supplierAccount}, Type=6 (PI), Nominal={nominalCode}, Tax=T9, Gross={grossAmount:C}");
 
             Console.WriteLine("  Calling Update()...");
             try
@@ -2813,6 +3114,80 @@ class SageConnection : IDisposable
         catch (Exception ex)
         {
             Console.WriteLine($"  Error listing nominal codes: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Create a new nominal code
+    /// </summary>
+    public bool CreateNominal(string nominalCode, string name)
+    {
+        if (_workspace == null) return false;
+
+        Console.WriteLine($"\n[CREATING NOMINAL CODE: {nominalCode}]");
+
+        try
+        {
+            var nominalRecord = InvokeComMethod(_workspace, "CreateObject", "NominalRecord");
+            if (nominalRecord == null)
+            {
+                Console.WriteLine("  Could not create NominalRecord object");
+                return false;
+            }
+
+            // Add new record
+            InvokeComMethod(nominalRecord, "Add");
+
+            SetFieldByName(nominalRecord, "ACCOUNT_REF", nominalCode);
+            SetFieldByName(nominalRecord, "NAME", name);
+
+            var result = InvokeComMethod(nominalRecord, "Update");
+            if (result != null && Convert.ToBoolean(result))
+            {
+                Console.WriteLine($"  Created: {nominalCode} - {name}");
+                return true;
+            }
+            else
+            {
+                TryShowLastError();
+                return false;
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  Error creating nominal: {ex.Message}");
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Check if a nominal code exists
+    /// </summary>
+    public bool NominalExists(string nominalCode)
+    {
+        if (_workspace == null) return false;
+
+        try
+        {
+            var nominalRecord = InvokeComMethod(_workspace, "CreateObject", "NominalRecord");
+            if (nominalRecord == null) return false;
+
+            InvokeComMethod(nominalRecord, "MoveFirst");
+            while (true)
+            {
+                var eof = InvokeComMethod(nominalRecord, "IsEOF");
+                if (eof != null && (bool)eof) break;
+
+                var code = GetFieldValue(nominalRecord, "ACCOUNT_REF")?.ToString();
+                if (code == nominalCode) return true;
+
+                InvokeComMethod(nominalRecord, "MoveNext");
+            }
+            return false;
+        }
+        catch
+        {
+            return false;
         }
     }
 

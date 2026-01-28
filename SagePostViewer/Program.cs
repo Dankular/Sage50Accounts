@@ -10,7 +10,7 @@ class Program
     {
         string dllPath = args.Length > 0
             ? args[0]
-            : Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "sg50SdoEngine.dll");
+            : Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "SageConnector", "SageSDO.Interop.dll");
 
         if (!File.Exists(dllPath))
         {
@@ -22,7 +22,7 @@ class Program
         Console.WriteLine(new string('=', 70));
 
         AnalyzePE(dllPath);
-        AnalyzeNetMetadata(dllPath);
+        AnalyzeInteropTypes(dllPath);
         FindSageComObjects();
     }
 
@@ -36,55 +36,6 @@ class Program
             Console.WriteLine($"  Is 64-bit: {peFile.Is64Bit}");
             Console.WriteLine($"  Is DLL: {peFile.IsDll}");
             Console.WriteLine($"  Is .NET: {peFile.IsDotNet}");
-
-            // Sage/Invoice related exports
-            if (peFile.ExportedFunctions != null && peFile.ExportedFunctions.Length > 0)
-            {
-                var sageExports = peFile.ExportedFunctions
-                    .Where(e => !string.IsNullOrEmpty(e.Name))
-                    .Where(e =>
-                        e.Name.Contains("Invoice", StringComparison.OrdinalIgnoreCase) ||
-                        e.Name.Contains("SalesOrder", StringComparison.OrdinalIgnoreCase) ||
-                        e.Name.Contains("PurchaseOrder", StringComparison.OrdinalIgnoreCase) ||
-                        e.Name.Contains("Customer", StringComparison.OrdinalIgnoreCase) ||
-                        e.Name.Contains("Supplier", StringComparison.OrdinalIgnoreCase) ||
-                        e.Name.Contains("Transaction", StringComparison.OrdinalIgnoreCase) ||
-                        e.Name.Contains("Post", StringComparison.OrdinalIgnoreCase) ||
-                        e.Name.Contains("Nominal", StringComparison.OrdinalIgnoreCase))
-                    .OrderBy(e => e.Name)
-                    .ToList();
-
-                if (sageExports.Any())
-                {
-                    Console.WriteLine($"\n[BUSINESS-RELATED EXPORTS] ({sageExports.Count} found)");
-                    foreach (var exp in sageExports.Take(60))
-                    {
-                        // Demangle C++ names for readability
-                        var name = exp.Name;
-                        if (name.Contains("CBInvoice"))
-                            Console.WriteLine($"    {name}");
-                        else if (name.Contains("CBSalesOrder"))
-                            Console.WriteLine($"    {name}");
-                        else if (name.Contains("CBPurchaseOrder"))
-                            Console.WriteLine($"    {name}");
-                    }
-                }
-            }
-
-            // Version Info
-            if (peFile.Resources?.VsVersionInfo != null)
-            {
-                Console.WriteLine("\n[VERSION INFO]");
-                var vi = peFile.Resources.VsVersionInfo;
-                if (vi.StringFileInfo?.StringTable != null)
-                {
-                    foreach (var table in vi.StringFileInfo.StringTable)
-                    {
-                        Console.WriteLine($"  Product: {table.ProductName} v{table.ProductVersion}");
-                        Console.WriteLine($"  Company: {table.CompanyName}");
-                    }
-                }
-            }
         }
         catch (Exception ex)
         {
@@ -92,9 +43,9 @@ class Program
         }
     }
 
-    static void AnalyzeNetMetadata(string dllPath)
+    static void AnalyzeInteropTypes(string dllPath)
     {
-        Console.WriteLine("\n[.NET METADATA EXPLORATION]");
+        Console.WriteLine("\n[ANALYZING INTEROP TYPES - TransactionPost Focus]");
 
         try
         {
@@ -103,119 +54,164 @@ class Program
 
             if (!peReader.HasMetadata)
             {
-                Console.WriteLine("  No .NET metadata found (native DLL)");
+                Console.WriteLine("  No .NET metadata found");
                 return;
             }
 
             var mdReader = peReader.GetMetadataReader();
 
-            // Assembly info
-            if (mdReader.IsAssembly)
-            {
-                var asmDef = mdReader.GetAssemblyDefinition();
-                Console.WriteLine($"  Assembly: {mdReader.GetString(asmDef.Name)} v{asmDef.Version}");
-            }
-
-            // Type definitions
-            var types = new List<(string Namespace, string Name, bool IsPublic, bool IsInterface, bool IsClass)>();
+            // Find all types related to Transaction, Post, Purchase, Supplier
+            var relevantTypes = new List<(TypeDefinitionHandle Handle, string Name, string Namespace, bool IsInterface)>();
 
             foreach (var typeHandle in mdReader.TypeDefinitions)
             {
                 var typeDef = mdReader.GetTypeDefinition(typeHandle);
-                var ns = mdReader.GetString(typeDef.Namespace);
                 var name = mdReader.GetString(typeDef.Name);
+                var ns = mdReader.GetString(typeDef.Namespace);
                 var attrs = typeDef.Attributes;
-
-                bool isPublic = (attrs & TypeAttributes.VisibilityMask) == TypeAttributes.Public;
                 bool isInterface = (attrs & TypeAttributes.ClassSemanticsMask) == TypeAttributes.Interface;
-                bool isClass = (attrs & TypeAttributes.ClassSemanticsMask) == TypeAttributes.Class;
 
-                if (!string.IsNullOrEmpty(name) && !name.StartsWith("<"))
+                if (name.Contains("Transaction", StringComparison.OrdinalIgnoreCase) ||
+                    name.Contains("Post", StringComparison.OrdinalIgnoreCase) ||
+                    name.Contains("Purchase", StringComparison.OrdinalIgnoreCase) ||
+                    name.Contains("Supplier", StringComparison.OrdinalIgnoreCase) ||
+                    name.Contains("Creditor", StringComparison.OrdinalIgnoreCase) ||
+                    name.Contains("Split", StringComparison.OrdinalIgnoreCase) ||
+                    name.Contains("Audit", StringComparison.OrdinalIgnoreCase))
                 {
-                    types.Add((ns, name, isPublic, isInterface, isClass));
+                    relevantTypes.Add((typeHandle, name, ns, isInterface));
                 }
             }
 
-            // Show public types
-            var publicTypes = types.Where(t => t.IsPublic).OrderBy(t => t.Namespace).ThenBy(t => t.Name).ToList();
+            Console.WriteLine($"\n  Found {relevantTypes.Count} relevant types:\n");
 
-            if (publicTypes.Any())
+            foreach (var (handle, name, ns, isInterface) in relevantTypes.OrderBy(t => t.Name))
             {
-                Console.WriteLine($"\n  [PUBLIC TYPES] ({publicTypes.Count} total)");
+                var kind = isInterface ? "interface" : "class";
+                Console.WriteLine($"  [{kind}] {ns}.{name}");
 
-                var byNamespace = publicTypes.GroupBy(t => t.Namespace).OrderBy(g => g.Key);
-                foreach (var nsGroup in byNamespace.Take(20))
+                // Get detailed info for this type
+                var typeDef = mdReader.GetTypeDefinition(handle);
+
+                // Show methods
+                var methods = typeDef.GetMethods();
+                var methodList = new List<string>();
+                foreach (var methodHandle in methods)
                 {
-                    Console.WriteLine($"\n    Namespace: {(string.IsNullOrEmpty(nsGroup.Key) ? "(global)" : nsGroup.Key)}");
-                    foreach (var t in nsGroup.Take(30))
+                    var method = mdReader.GetMethodDefinition(methodHandle);
+                    var methodName = mdReader.GetString(method.Name);
+                    if (!methodName.StartsWith("get_") && !methodName.StartsWith("set_") &&
+                        !methodName.StartsWith(".") && methodName != "QueryInterface" &&
+                        methodName != "QueryInterface" && methodName != "QueryInterface" &&
+                        methodName != "QueryInterface" && methodName != "AddRef" && methodName != "Release" &&
+                        methodName != "QueryInterface" && methodName != "Queryinterface" &&
+                        methodName != "QueryInterface" && methodName != "Queryinterface")
                     {
-                        var typeKind = t.IsInterface ? "interface" : "class";
-                        Console.WriteLine($"      [{typeKind}] {t.Name}");
+                        // Get parameters
+                        var sig = method.DecodeSignature(new SignatureDecoder(mdReader), null);
+                        var paramNames = new List<string>();
+                        foreach (var paramHandle in method.GetParameters())
+                        {
+                            var param = mdReader.GetParameter(paramHandle);
+                            if (param.SequenceNumber > 0) // Skip return value
+                            {
+                                var paramName = mdReader.GetString(param.Name);
+                                paramNames.Add(paramName);
+                            }
+                        }
+                        var paramStr = paramNames.Any() ? $"({string.Join(", ", paramNames)})" : "()";
+                        methodList.Add($"{methodName}{paramStr}");
                     }
-                    if (nsGroup.Count() > 30)
-                        Console.WriteLine($"      ... and {nsGroup.Count() - 30} more");
                 }
-            }
 
-            // Look for Sage-specific types
-            var sageTypes = types.Where(t =>
-                t.Name.Contains("Invoice") ||
-                t.Name.Contains("Sales") ||
-                t.Name.Contains("Purchase") ||
-                t.Name.Contains("Customer") ||
-                t.Name.Contains("Supplier") ||
-                t.Name.Contains("SDO") ||
-                t.Name.Contains("Sdo") ||
-                t.Name.Contains("Engine") ||
-                t.Name.Contains("Company") ||
-                t.Name.Contains("Nominal") ||
-                t.Name.Contains("Transaction") ||
-                t.Name.Contains("Post"))
-                .OrderBy(t => t.Name)
-                .ToList();
-
-            if (sageTypes.Any())
-            {
-                Console.WriteLine($"\n  [SAGE BUSINESS TYPES] ({sageTypes.Count} found)");
-                foreach (var t in sageTypes.Take(50))
+                if (methodList.Any())
                 {
-                    var visibility = t.IsPublic ? "public" : "internal";
-                    var typeKind = t.IsInterface ? "interface" : "class";
-                    Console.WriteLine($"    [{visibility} {typeKind}] {t.Namespace}.{t.Name}");
+                    Console.WriteLine($"      Methods:");
+                    foreach (var m in methodList.Take(20))
+                    {
+                        Console.WriteLine($"        - {m}");
+                    }
+                    if (methodList.Count > 20)
+                        Console.WriteLine($"        ... and {methodList.Count - 20} more");
                 }
-            }
 
-            // Type references (what external types does it use?)
-            Console.WriteLine($"\n  [TYPE REFERENCES]");
-            var typeRefs = new HashSet<string>();
-            foreach (var refHandle in mdReader.TypeReferences)
-            {
-                var typeRef = mdReader.GetTypeReference(refHandle);
-                var ns = mdReader.GetString(typeRef.Namespace);
-                var name = mdReader.GetString(typeRef.Name);
-                if (!string.IsNullOrEmpty(name) && (ns.Contains("Sage") || name.Contains("SDO") || name.Contains("Sdo")))
+                // Show properties
+                var props = typeDef.GetProperties();
+                var propList = new List<string>();
+                foreach (var propHandle in props)
                 {
-                    typeRefs.Add($"{ns}.{name}");
+                    var prop = mdReader.GetPropertyDefinition(propHandle);
+                    var propName = mdReader.GetString(prop.Name);
+                    propList.Add(propName);
                 }
+
+                if (propList.Any())
+                {
+                    Console.WriteLine($"      Properties:");
+                    foreach (var p in propList.Take(30))
+                    {
+                        Console.WriteLine($"        - {p}");
+                    }
+                    if (propList.Count > 30)
+                        Console.WriteLine($"        ... and {propList.Count - 30} more");
+                }
+
+                Console.WriteLine();
             }
 
-            foreach (var tr in typeRefs.OrderBy(x => x).Take(30))
+            // Look for enums that might define TYPE values
+            Console.WriteLine("\n[LOOKING FOR TYPE/TRANSACTION ENUMS]");
+            foreach (var typeHandle in mdReader.TypeDefinitions)
             {
-                Console.WriteLine($"    {tr}");
-            }
+                var typeDef = mdReader.GetTypeDefinition(typeHandle);
+                var name = mdReader.GetString(typeDef.Name);
+                var baseType = typeDef.BaseType;
 
-            // Assembly references
-            Console.WriteLine($"\n  [ASSEMBLY REFERENCES]");
-            foreach (var refHandle in mdReader.AssemblyReferences)
-            {
-                var asmRef = mdReader.GetAssemblyReference(refHandle);
-                var name = mdReader.GetString(asmRef.Name);
-                Console.WriteLine($"    {name} v{asmRef.Version}");
+                // Check if it's an enum (extends System.Enum)
+                if (!baseType.IsNil)
+                {
+                    string baseTypeName = "";
+                    if (baseType.Kind == HandleKind.TypeReference)
+                    {
+                        var typeRef = mdReader.GetTypeReference((TypeReferenceHandle)baseType);
+                        baseTypeName = mdReader.GetString(typeRef.Name);
+                    }
+
+                    if (baseTypeName == "Enum" &&
+                        (name.Contains("Type", StringComparison.OrdinalIgnoreCase) ||
+                         name.Contains("Trans", StringComparison.OrdinalIgnoreCase)))
+                    {
+                        Console.WriteLine($"\n  [enum] {name}");
+
+                        // Get enum values
+                        foreach (var fieldHandle in typeDef.GetFields())
+                        {
+                            var field = mdReader.GetFieldDefinition(fieldHandle);
+                            var fieldName = mdReader.GetString(field.Name);
+                            if (fieldName != "value__")
+                            {
+                                // Try to get the constant value
+                                var constHandle = field.GetDefaultValue();
+                                if (!constHandle.IsNil)
+                                {
+                                    var constant = mdReader.GetConstant(constHandle);
+                                    var value = mdReader.GetBlobReader(constant.Value).ReadInt32();
+                                    Console.WriteLine($"      {fieldName} = {value}");
+                                }
+                                else
+                                {
+                                    Console.WriteLine($"      {fieldName}");
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"  .NET Metadata error: {ex.Message}");
+            Console.WriteLine($"  Error: {ex.Message}");
+            Console.WriteLine($"  Stack: {ex.StackTrace}");
         }
     }
 
@@ -226,8 +222,6 @@ class Program
         try
         {
             var sageProgIds = new List<string>();
-
-            // Search HKEY_CLASSES_ROOT for Sage-related ProgIDs
             using var classesRoot = Microsoft.Win32.Registry.ClassesRoot;
 
             foreach (var subKeyName in classesRoot.GetSubKeyNames())
@@ -247,45 +241,53 @@ class Program
                 }
             }
 
-            if (sageProgIds.Any())
+            // Focus on transaction-related
+            var transactionRelated = sageProgIds.Where(p =>
+                p.Contains("Transaction", StringComparison.OrdinalIgnoreCase) ||
+                p.Contains("Post", StringComparison.OrdinalIgnoreCase) ||
+                p.Contains("Purchase", StringComparison.OrdinalIgnoreCase) ||
+                p.Contains("Supplier", StringComparison.OrdinalIgnoreCase)).ToList();
+
+            if (transactionRelated.Any())
             {
-                Console.WriteLine($"  Found {sageProgIds.Count} Sage-related COM ProgIDs:\n");
-
-                // Group by prefix
-                var grouped = sageProgIds
-                    .OrderBy(x => x)
-                    .GroupBy(x => x.Split('.').FirstOrDefault() ?? x);
-
-                foreach (var group in grouped)
+                Console.WriteLine($"\n  Transaction-related COM objects:");
+                foreach (var progId in transactionRelated)
                 {
-                    Console.WriteLine($"  [{group.Key}]");
-                    foreach (var progId in group.Take(25))
-                    {
-                        Console.WriteLine($"    {progId}");
-                    }
-                    if (group.Count() > 25)
-                        Console.WriteLine($"    ... and {group.Count() - 25} more");
-                }
-
-                // Look specifically for SDOEngine
-                var sdoEngine = sageProgIds.FirstOrDefault(p =>
-                    p.Contains("SDOEngine", StringComparison.OrdinalIgnoreCase) ||
-                    p.Contains("SdoEngine", StringComparison.OrdinalIgnoreCase));
-
-                if (sdoEngine != null)
-                {
-                    Console.WriteLine($"\n  ** Found SDO Engine: {sdoEngine} **");
+                    Console.WriteLine($"    {progId}");
                 }
             }
-            else
-            {
-                Console.WriteLine("  No Sage COM objects found in registry.");
-                Console.WriteLine("  (Sage 50 may not be installed or COM registration missing)");
-            }
+
+            Console.WriteLine($"\n  Total Sage COM objects: {sageProgIds.Count}");
         }
         catch (Exception ex)
         {
             Console.WriteLine($"  Registry search error: {ex.Message}");
         }
     }
+}
+
+// Simple signature decoder for method signatures
+class SignatureDecoder : ISignatureTypeProvider<string, object?>
+{
+    private readonly MetadataReader _reader;
+
+    public SignatureDecoder(MetadataReader reader) => _reader = reader;
+
+    public string GetPrimitiveType(PrimitiveTypeCode typeCode) => typeCode.ToString();
+    public string GetTypeFromDefinition(MetadataReader reader, TypeDefinitionHandle handle, byte rawTypeKind) =>
+        reader.GetString(reader.GetTypeDefinition(handle).Name);
+    public string GetTypeFromReference(MetadataReader reader, TypeReferenceHandle handle, byte rawTypeKind) =>
+        reader.GetString(reader.GetTypeReference(handle).Name);
+    public string GetTypeFromSpecification(MetadataReader reader, object? genericContext, TypeSpecificationHandle handle, byte rawTypeKind) => "TypeSpec";
+    public string GetSZArrayType(string elementType) => $"{elementType}[]";
+    public string GetPointerType(string elementType) => $"{elementType}*";
+    public string GetByReferenceType(string elementType) => $"ref {elementType}";
+    public string GetGenericInstantiation(string genericType, System.Collections.Immutable.ImmutableArray<string> typeArguments) =>
+        $"{genericType}<{string.Join(", ", typeArguments)}>";
+    public string GetGenericTypeParameter(object? genericContext, int index) => $"T{index}";
+    public string GetGenericMethodParameter(object? genericContext, int index) => $"M{index}";
+    public string GetFunctionPointerType(MethodSignature<string> signature) => "FnPtr";
+    public string GetModifiedType(string modifier, string unmodifiedType, bool isRequired) => unmodifiedType;
+    public string GetPinnedType(string elementType) => elementType;
+    public string GetArrayType(string elementType, ArrayShape shape) => $"{elementType}[{shape.Rank}]";
 }

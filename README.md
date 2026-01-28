@@ -133,17 +133,23 @@ if (customer != null)
 
 The `TransactionPost` object is the correct way to post transactions that update ledger balances:
 
-| TYPE | Transaction | Description |
-|------|-------------|-------------|
+| TYPE | Code | Description |
+|------|------|-------------|
 | 1 | SI | Sales Invoice - Updates customer balance |
 | 2 | SC | Sales Credit |
-| 3 | SA | Sales Receipt/Payment |
-| 4 | PI | Purchase Invoice - Updates supplier balance |
-| 5 | PC | Purchase Credit |
-| 6 | PP | Purchase Payment |
+| 3 | SR | Sales Receipt |
+| 4 | SA | Sales Adjustment |
+| 5 | SD | Sales Discount |
+| 6 | PI | Purchase Invoice - Updates supplier balance |
+| 7 | PC | Purchase Credit |
+| 8 | PP | Purchase Payment |
+| 9 | PA | Purchase Adjustment |
+| 10 | PD | Purchase Discount |
+
+**Note:** Sales types (1-5) use T1 tax code, Purchase types (6-10) require T9 tax code.
 
 **TransactionPost Header Fields** (66 total):
-- `TYPE` - Transaction type (1-10)
+- `TYPE` - Transaction type (1-10, see TransType enum above)
 - `ACCOUNT_REF` - Customer/Supplier account reference
 - `DATE` - Transaction date
 - `INV_REF` - Invoice reference
@@ -176,10 +182,10 @@ Use these when you need to create order documents that will be posted later thro
 - Must be unique within the ledger
 
 ### Purchase Invoice Posting
-The `TransactionPost` with TYPE=4 (Purchase Invoice) has limitations:
-- Accounts must exist in BOTH customer and supplier tables for reliable posting
+The `TransactionPost` with TYPE=6 (Purchase Invoice) works reliably:
+- Accounts must exist as suppliers in the Purchase Ledger
+- Use T9 tax code for all purchase transaction types (6-10)
 - Multi-currency supplier accounts may cause "Foreign Currency mismatch" errors
-- For reliable purchase posting, consider using journal entries or the Sage 50 UI
 
 ### What Works Reliably
 
@@ -194,6 +200,7 @@ The `TransactionPost` with TYPE=4 (Purchase Invoice) has limitations:
 - Create customer accounts
 - Create supplier accounts
 - Post sales invoices (via TransactionPost TYPE=1)
+- Post purchase invoices (via TransactionPost TYPE=6)
 - Create invoice documents (via InvoicePost/SopPost)
 
 ## Troubleshooting
