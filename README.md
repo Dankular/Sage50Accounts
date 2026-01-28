@@ -2,7 +2,7 @@
 
 C# console application for interacting with Sage 50 Accounts (UK) via the SDO (Sage Data Objects) COM interface.
 
-**No Sage 50 SDO installation required** - The SDK is automatically downloaded and loaded without COM registration.
+**No Sage 50 Accounts SDO installation required** - The SDK is automatically downloaded and loaded without COM registration.
 
 ## SageConnector
 
@@ -17,20 +17,12 @@ A console application that connects to Sage 50 Accounts and provides:
 - **List invoices** - View recent invoice records with details
 - **Create invoice documents** - Via InvoicePost/SopPost (order processing system)
 
-## DtaAnalyzer
-
-A CLI tool for analyzing Sage 50 data files and PE binaries:
-
-- **Fingerprint ACCDATA** - Detect Sage version from schema GUIDs
-- **Analyze DTA files** - Hex dump, string extraction, structure analysis
-- **Analyze PE files** - Imports, exports, COM registration info via PeNet
-
 ## Requirements
 
 - **.NET 9.0** or later (Windows x64)
 - Access to a Sage 50 company data folder (e.g., `X:\ACCDATA`)
 
-**No Sage 50 installation needed** - The SDK Manager automatically:
+**No Sage 50 Accounts SDO installation needed** - The SDK Manager automatically:
 1. Detects the Sage version from ACCDATA
 2. Downloads the matching SDK from Sage KB
 3. Extracts all dependencies from the MSI
@@ -110,24 +102,6 @@ SageConnector.exe sdk test "X:\ACCDATA"
 5. Creates COM objects via `DllGetClassObject` (no registration)
 
 SDK files are cached in `%LOCALAPPDATA%\SageConnector\SDK\`.
-
-### DtaAnalyzer Commands
-
-```bash
-# Analyze ACCDATA folder
-DtaAnalyzer.exe "X:\ACCDATA"              # Full analysis
-DtaAnalyzer.exe "X:\ACCDATA" fingerprint  # Generate version fingerprint
-DtaAnalyzer.exe "X:\ACCDATA" scan         # Quick scan for version markers
-DtaAnalyzer.exe "X:\ACCDATA" guids        # Extract all GUIDs
-
-# Analyze individual files
-DtaAnalyzer.exe "file.dta" dump 512       # Hex dump (512 bytes)
-DtaAnalyzer.exe "file.dta" strings        # Extract ASCII strings
-DtaAnalyzer.exe "file.dta" structure      # Analyze file structure
-
-# Analyze PE files (DLLs)
-DtaAnalyzer.exe "sg50SdoEngine.dll" pe    # Show imports, exports, COM info
-```
 
 ## Code Examples
 
