@@ -648,6 +648,14 @@ static class SdkManager
         ["5D3EB135-3317-413B-99DE-47C6B044134D"] = "32.0", // Observed in v32 data
     };
 
+    // TABLEMETADATA.DTA header format version mapped to Sage versions
+    // First 4 bytes contain a format version number
+    private static readonly Dictionary<uint, string> KnownTableMetaVersions = new()
+    {
+        [0x15] = "32.0", // Format version 21 observed in v32 data
+        // Add more mappings as discovered from different Sage versions
+    };
+
     /// <summary>
     /// Detect Sage 50 version from ACCDATA folder by analyzing DTA file structure
     /// </summary>
@@ -697,7 +705,31 @@ static class SdkManager
             }
         }
 
-        // Method 2: Check ACCDATA.INI for Sage program path
+        // Method 2: Check TABLEMETADATA.DTA header format version
+        var tableMetaPath = Path.Combine(accDataPath, "TABLEMETADATA.DTA");
+        if (File.Exists(tableMetaPath))
+        {
+            try
+            {
+                using var fs = new FileStream(tableMetaPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+                var header = new byte[4];
+                fs.Read(header, 0, 4);
+                var formatVersion = BitConverter.ToUInt32(header, 0);
+                Console.WriteLine($"  TABLEMETADATA.DTA format version: {formatVersion} (0x{formatVersion:X2})");
+
+                if (KnownTableMetaVersions.TryGetValue(formatVersion, out var version))
+                {
+                    Console.WriteLine($"  Detected version from TABLEMETADATA format: {version}");
+                    return version;
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"  Could not read TABLEMETADATA.DTA: {ex.Message}");
+            }
+        }
+
+        // Method 3: Check ACCDATA.INI for Sage program path
         var accdataIni = Path.Combine(accDataPath, "ACCDATA.INI");
         if (File.Exists(accdataIni))
         {
