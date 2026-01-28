@@ -2,7 +2,7 @@
 
 C# console application for interacting with Sage 50 Accounts (UK) via the SDO (Sage Data Objects) COM interface.
 
-**No Sage 50 installation required** - The SDK is automatically downloaded and loaded without COM registration.
+**No Sage 50 SDO installation required** - The SDK is automatically downloaded and loaded without COM registration.
 
 ## SageConnector
 
