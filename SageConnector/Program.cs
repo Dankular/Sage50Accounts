@@ -639,21 +639,88 @@ static class SdkManager
         ["26.0"] = ("https://downloads.sage.co.uk/download/?did=f71b5929-1a8f-4c65-82a6-b15a7b01cb7a", ""),
     };
 
-    /// <summary>
-    /// Detect Sage 50 version from ACCDATA folder
-    /// Reads the HEADER.DTA file which contains version info in its header bytes
-    /// </summary>
-    public static string? DetectVersion(string accDataPath)
+    // Known GUID fingerprints from ACCSTAT.DTA mapped to Sage versions
+    // These GUIDs appear to be schema identifiers that change per major version
+    private static readonly Dictionary<string, string> KnownSchemaGuids = new()
     {
-        if (!Directory.Exists(accDataPath))
+        // Add known GUIDs here as they're discovered
+        // Format: GUID -> Version
+        ["5D3EB135-3317-413B-99DE-47C6B044134D"] = "32.0", // Observed in v32 data
+    };
+
+    /// <summary>
+    /// Detect Sage 50 version from ACCDATA folder by analyzing DTA file structure
+    /// </summary>
+    public static string? DetectVersion(string? accDataPath = null)
+    {
+        if (string.IsNullOrEmpty(accDataPath) || !Directory.Exists(accDataPath))
         {
-            Console.WriteLine($"  ACCDATA path not found: {accDataPath}");
+            if (!string.IsNullOrEmpty(accDataPath))
+                Console.WriteLine($"  ACCDATA path not found: {accDataPath}");
             return null;
         }
 
-        // Try multiple methods to detect version
+        // Method 1: Extract GUID from ACCSTAT.DTA and lookup known versions
+        var accstatPath = Path.Combine(accDataPath, "ACCSTAT.DTA");
+        if (File.Exists(accstatPath))
+        {
+            try
+            {
+                using var fs = new FileStream(accstatPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+                var buffer = new byte[256];
+                fs.Read(buffer, 0, buffer.Length);
+                var content = System.Text.Encoding.ASCII.GetString(buffer);
 
-        // Method 1: Check HEADER.DTA file signature
+                // Extract GUID pattern
+                var guidMatch = System.Text.RegularExpressions.Regex.Match(content,
+                    @"([0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12})");
+
+                if (guidMatch.Success)
+                {
+                    var guid = guidMatch.Groups[1].Value.ToUpperInvariant();
+                    Console.WriteLine($"  ACCSTAT.DTA schema GUID: {guid}");
+
+                    if (KnownSchemaGuids.TryGetValue(guid, out var version))
+                    {
+                        Console.WriteLine($"  Detected version from GUID fingerprint: {version}");
+                        return version;
+                    }
+                    else
+                    {
+                        Console.WriteLine($"  Unknown GUID - add to KnownSchemaGuids mapping");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"  Could not read ACCSTAT.DTA: {ex.Message}");
+            }
+        }
+
+        // Method 2: Check ACCDATA.INI for Sage program path
+        var accdataIni = Path.Combine(accDataPath, "ACCDATA.INI");
+        if (File.Exists(accdataIni))
+        {
+            try
+            {
+                var iniContent = File.ReadAllText(accdataIni);
+                // Look for version in program path like "SAGE\ACCOUNTS\2024" or similar
+                var pathMatch = System.Text.RegularExpressions.Regex.Match(iniContent, @"SAGE\\ACCOUNTS\\(\d{4})",
+                    System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                if (pathMatch.Success && int.TryParse(pathMatch.Groups[1].Value, out int year))
+                {
+                    int ver = year - 1992; // 2024 -> 32, 2025 -> 33
+                    if (ver >= 26 && ver <= 35)
+                    {
+                        Console.WriteLine($"  Detected version from ACCDATA.INI path (year {year}): {ver}.0");
+                        return $"{ver}.0";
+                    }
+                }
+            }
+            catch { }
+        }
+
+        // Method 3: Check HEADER.DTA file signature (less common)
         var headerDta = Path.Combine(accDataPath, "HEADER.DTA");
         if (File.Exists(headerDta))
         {
@@ -751,6 +818,7 @@ static class SdkManager
 
     /// <summary>
     /// Get the download URL for a specific version
+    /// Falls back to closest available version for the same major version
     /// </summary>
     public static string? GetDownloadUrl(string version, bool prefer64Bit = true)
     {
@@ -758,6 +826,7 @@ static class SdkManager
         if (!version.Contains('.'))
             version = $"{version}.0";
 
+        // Try exact match first
         if (SdkDownloads.TryGetValue(version, out var urls))
         {
             var url = prefer64Bit && !string.IsNullOrEmpty(urls.Url64) ? urls.Url64 : urls.Url32;
@@ -765,10 +834,16 @@ static class SdkManager
                 return url;
         }
 
-        // Try major version only
-        var majorVersion = version.Split('.')[0] + ".0";
-        if (SdkDownloads.TryGetValue(majorVersion, out urls))
+        // Try to find any version with same major number (e.g., 31.0 -> 31.1)
+        var majorVersion = version.Split('.')[0];
+        var matchingVersion = SdkDownloads.Keys
+            .Where(k => k.StartsWith(majorVersion + "."))
+            .OrderByDescending(k => k) // Get highest minor version
+            .FirstOrDefault();
+
+        if (matchingVersion != null && SdkDownloads.TryGetValue(matchingVersion, out urls))
         {
+            Console.WriteLine($"  Using SDK v{matchingVersion} (closest to v{version})");
             return prefer64Bit && !string.IsNullOrEmpty(urls.Url64) ? urls.Url64 : urls.Url32;
         }
 
