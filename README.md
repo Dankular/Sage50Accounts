@@ -2,6 +2,8 @@
 
 C# console application for interacting with Sage 50 Accounts (UK) via the SDO (Sage Data Objects) COM interface.
 
+**No Sage 50 installation required** - The SDK is automatically downloaded and loaded without COM registration.
+
 ## SageConnector
 
 A console application that connects to Sage 50 Accounts and provides:
@@ -15,11 +17,24 @@ A console application that connects to Sage 50 Accounts and provides:
 - **List invoices** - View recent invoice records with details
 - **Create invoice documents** - Via InvoicePost/SopPost (order processing system)
 
+## DtaAnalyzer
+
+A CLI tool for analyzing Sage 50 data files and PE binaries:
+
+- **Fingerprint ACCDATA** - Detect Sage version from schema GUIDs
+- **Analyze DTA files** - Hex dump, string extraction, structure analysis
+- **Analyze PE files** - Imports, exports, COM registration info via PeNet
+
 ## Requirements
 
 - **.NET 9.0** or later (Windows x64)
 - Access to a Sage 50 company data folder (e.g., `X:\ACCDATA`)
-- **Sage 50 SDO Engine** - auto-downloaded if not installed (see SDK Management below)
+
+**No Sage 50 installation needed** - The SDK Manager automatically:
+1. Detects the Sage version from ACCDATA
+2. Downloads the matching SDK from Sage KB
+3. Extracts all dependencies from the MSI
+4. Loads the SDK using registration-free COM
 
 ## Usage
 
@@ -37,8 +52,11 @@ SageConnector.exe "X:\ACCDATA" "manager" "password"
 SageConnector.exe "X:\ACCDATA" "manager" "password"
 
 # Invoice Posting (updates ledger balances)
-SageConnector.exe ... sinv      # Post sales invoice to FALCONLO
-SageConnector.exe ... pinv      # Post purchase invoice
+SageConnector.exe ... sinv              # Post sales invoice
+SageConnector.exe ... sinv CUST01       # Post to specific customer
+SageConnector.exe ... sinv CUST01 -auto # Auto-create customer if missing
+SageConnector.exe ... pinv              # Post purchase invoice
+SageConnector.exe ... pinv SUP01 -auto  # Auto-create supplier if missing
 
 # Order Processing (creates documents only)
 SageConnector.exe ... invdoc    # Create invoice document via InvoicePost
@@ -62,13 +80,13 @@ SageConnector.exe ... discover  # Discover available SDK posting objects
 
 ### SDK Management
 
-The SDK Manager automatically detects the Sage 50 version from ACCDATA and downloads the appropriate SDK.
+The SDK Manager automatically detects the Sage 50 version from ACCDATA and downloads the appropriate SDK. No COM registration or admin rights required.
 
 ```bash
 # Check SDK status
 SageConnector.exe sdk status
 
-# List available SDK versions
+# List available SDK versions (v26-v33)
 SageConnector.exe sdk list
 
 # Detect version from ACCDATA
@@ -77,11 +95,39 @@ SageConnector.exe sdk detect "X:\ACCDATA"
 # Download specific SDK version
 SageConnector.exe sdk download 32.0
 
-# Auto-detect and install SDK for ACCDATA
+# Auto-detect, download and extract SDK
 SageConnector.exe sdk install "X:\ACCDATA"
+
+# Test registration-free COM loading
+SageConnector.exe sdk test "X:\ACCDATA"
 ```
 
-SDK downloads are sourced from the official Sage KB article and cached locally.
+**How it works:**
+1. Detects Sage version from ACCSTAT.DTA schema GUID
+2. Downloads SDK ZIP from official Sage KB article
+3. Extracts MSI from ZIP to get all 31 dependency DLLs
+4. Loads `sg50SdoEngine.dll` via `LoadLibrary`
+5. Creates COM objects via `DllGetClassObject` (no registration)
+
+SDK files are cached in `%LOCALAPPDATA%\SageConnector\SDK\`.
+
+### DtaAnalyzer Commands
+
+```bash
+# Analyze ACCDATA folder
+DtaAnalyzer.exe "X:\ACCDATA"              # Full analysis
+DtaAnalyzer.exe "X:\ACCDATA" fingerprint  # Generate version fingerprint
+DtaAnalyzer.exe "X:\ACCDATA" scan         # Quick scan for version markers
+DtaAnalyzer.exe "X:\ACCDATA" guids        # Extract all GUIDs
+
+# Analyze individual files
+DtaAnalyzer.exe "file.dta" dump 512       # Hex dump (512 bytes)
+DtaAnalyzer.exe "file.dta" strings        # Extract ASCII strings
+DtaAnalyzer.exe "file.dta" structure      # Analyze file structure
+
+# Analyze PE files (DLLs)
+DtaAnalyzer.exe "sg50SdoEngine.dll" pe    # Show imports, exports, COM info
+```
 
 ## Code Examples
 
@@ -109,7 +155,7 @@ var success = sage.PostSalesInvoice(
     taxCode: "T1",          // Standard VAT
     postToLedger: true
 );
-// Customer balance increases by £120.00 (gross)
+// Customer balance increases by 120.00 (gross)
 ```
 
 ### Create a Customer
@@ -121,7 +167,7 @@ var success = sage.CreateCustomerEx(
     address1: "123 Business Street",
     address2: "Business Park",
     postcode: "AB1 2CD",
-    telephone: "01onal234 567890",
+    telephone: "01234 567890",
     email: "info@customer.com"
 );
 ```
@@ -165,22 +211,6 @@ The `TransactionPost` object is the correct way to post transactions that update
 
 **Note:** Sales types (1-5) use T1 tax code, Purchase types (6-10) require T9 tax code.
 
-**TransactionPost Header Fields** (66 total):
-- `TYPE` - Transaction type (1-10, see TransType enum above)
-- `ACCOUNT_REF` - Customer/Supplier account reference
-- `DATE` - Transaction date
-- `INV_REF` - Invoice reference
-- `DETAILS` - Transaction description
-- `NET_AMOUNT` - Net amount
-- `TAX_AMOUNT` - VAT amount
-
-**TransactionPost Item Fields** (47 total):
-- `NOMINAL_CODE` - Nominal account code
-- `NET_AMOUNT` - Line net amount
-- `TAX_AMOUNT` - Line VAT amount
-- `TAX_CODE` - Tax code (0=T0, 1=T1, etc.)
-- `DETAILS` - Line description
-
 ### InvoicePost / SopPost (Order Processing)
 
 These objects create invoice/order documents but do NOT update ledger balances:
@@ -204,22 +234,6 @@ The `TransactionPost` with TYPE=6 (Purchase Invoice) works reliably:
 - Use T9 tax code for all purchase transaction types (6-10)
 - Multi-currency supplier accounts may cause "Foreign Currency mismatch" errors
 
-### What Works Reliably
-
-**Read Operations:**
-- Connect to Sage 50
-- Read company information (294 fields)
-- List customers/suppliers with balances
-- List invoices with details
-- Search for accounts by name/reference
-
-**Write Operations:**
-- Create customer accounts
-- Create supplier accounts
-- Post sales invoices (via TransactionPost TYPE=1)
-- Post purchase invoices (via TransactionPost TYPE=6)
-- Create invoice documents (via InvoicePost/SopPost)
-
 ## Troubleshooting
 
 ### "Username is already in use"
@@ -228,8 +242,8 @@ The SDK only allows one connection per username. Wait a few seconds for the prev
 ### "Accounts application is busy"
 Sage 50 is open on another machine. Close Sage or wait for other users to finish.
 
-### "SDOEngine.32 not found"
-Sage 50 is not installed or the COM components are not registered.
+### "No Sage SDO Engine found"
+Run `sdk install "X:\ACCDATA"` to download and extract the SDK automatically.
 
 ### "Empty key specified" when creating accounts
 Account reference exceeds 8 characters or contains invalid characters.
@@ -237,13 +251,16 @@ Account reference exceeds 8 characters or contains invalid characters.
 ### "Foreign Currency mismatch"
 The account is set up with a different currency. Ensure the transaction currency matches the account currency.
 
-## Type Library
+## Version Detection
 
-The `SdoEng.tlb` file can be used to generate a typed interop assembly:
+The SDK Manager detects Sage version using multiple methods:
 
-```bash
-tlbimp SdoEng.tlb /out:SageSDO.Interop.dll /namespace:SageSDO
-```
+1. **ACCSTAT.DTA GUID** - Schema identifier unique to each major version
+2. **TABLEMETADATA.DTA** - Format version in file header
+3. **Path inference** - Year from folder structure (e.g., `Accounts/2024` = v32)
+
+Known schema GUIDs:
+- `5D3EB135-3317-413B-99DE-47C6B044134D` = v32.0
 
 ## License
 
