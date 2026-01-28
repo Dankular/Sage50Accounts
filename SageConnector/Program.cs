@@ -160,13 +160,55 @@ class Program
                 sage.ReadAuditRecords(20);
             }
             // Test sales invoice posting (direct to ledger via TransactionPost)
+            // Usage: sinv [account] [-auto]
             else if (args.Any(a => a.Equals("sinv", StringComparison.OrdinalIgnoreCase)))
             {
                 Console.WriteLine("\n*** POSTING SALES INVOICE (via TransactionPost) ***");
 
+                // Parse optional account and -auto flag
+                var sinvIndex = Array.FindIndex(args, a => a.Equals("sinv", StringComparison.OrdinalIgnoreCase));
+                var autoCreate = args.Any(a => a.Equals("-auto", StringComparison.OrdinalIgnoreCase));
+                var customerRef = "FALCONLO"; // default
+
+                // Check if next arg after sinv is an account ref (not a flag)
+                if (sinvIndex + 1 < args.Length && !args[sinvIndex + 1].StartsWith("-"))
+                {
+                    customerRef = args[sinvIndex + 1].ToUpperInvariant();
+                    if (customerRef.Length > 8) customerRef = customerRef[..8];
+                }
+
+                Console.WriteLine($"  Account: {customerRef}, Auto-create: {autoCreate}");
+
+                // Check if customer exists, create if -auto flag set
+                if (!sage.CustomerExists(customerRef))
+                {
+                    if (autoCreate)
+                    {
+                        Console.WriteLine($"  Customer '{customerRef}' not found - creating...");
+                        var cust = new CustomerAccount
+                        {
+                            AccountRef = customerRef,
+                            Name = $"Auto-created {customerRef}",
+                            Address1 = "Auto-created account",
+                            Postcode = "AA1 1AA"
+                        };
+                        if (!sage.CreateCustomerEx(cust))
+                        {
+                            Console.WriteLine("  Failed to create customer account.");
+                            return;
+                        }
+                        Console.WriteLine($"  Customer '{customerRef}' created.");
+                    }
+                    else
+                    {
+                        Console.WriteLine($"  Customer '{customerRef}' not found. Use -auto to create.");
+                        return;
+                    }
+                }
+
                 // Use TransactionPost which updates customer balance (not InvoicePost which just creates documents)
                 var success = sage.PostTransactionSI(
-                    customerAccount: "FALCONLO",
+                    customerAccount: customerRef,
                     invoiceRef: $"SI-{DateTime.Now:yyyyMMddHHmmss}",
                     netAmount: 100.00m,
                     taxAmount: 20.00m,
@@ -201,23 +243,50 @@ class Program
                     Console.WriteLine("\nInvoice document creation failed.");
             }
             // Test purchase invoice posting (direct to ledger)
+            // Usage: pinv [account] [-auto]
             else if (args.Any(a => a.Equals("pinv", StringComparison.OrdinalIgnoreCase)))
             {
                 Console.WriteLine("\n*** POSTING PURCHASE INVOICE ***");
 
-                // First, create FALCONLO as a supplier if it doesn't exist
-                var supplierRef = "FALCONLO";
+                // Parse optional account and -auto flag
+                var pinvIndex = Array.FindIndex(args, a => a.Equals("pinv", StringComparison.OrdinalIgnoreCase));
+                var autoCreate = args.Any(a => a.Equals("-auto", StringComparison.OrdinalIgnoreCase));
+                var supplierRef = "FALCONLO"; // default
+
+                // Check if next arg after pinv is an account ref (not a flag)
+                if (pinvIndex + 1 < args.Length && !args[pinvIndex + 1].StartsWith("-"))
+                {
+                    supplierRef = args[pinvIndex + 1].ToUpperInvariant();
+                    if (supplierRef.Length > 8) supplierRef = supplierRef[..8];
+                }
+
+                Console.WriteLine($"  Account: {supplierRef}, Auto-create: {autoCreate}");
+
+                // Check if supplier exists, create if -auto flag set
                 if (!sage.SupplierExists(supplierRef))
                 {
-                    Console.WriteLine($"  Creating {supplierRef} as supplier (already exists as customer)...");
-                    var sup = new SupplierAccount
+                    if (autoCreate)
                     {
-                        AccountRef = supplierRef,
-                        Name = "Falcon Logistics",
-                        Address1 = "Test Address",
-                        Postcode = "TE5 T12"
-                    };
-                    sage.CreateSupplierEx(sup);
+                        Console.WriteLine($"  Supplier '{supplierRef}' not found - creating...");
+                        var sup = new SupplierAccount
+                        {
+                            AccountRef = supplierRef,
+                            Name = $"Auto-created {supplierRef}",
+                            Address1 = "Auto-created account",
+                            Postcode = "AA1 1AA"
+                        };
+                        if (!sage.CreateSupplierEx(sup))
+                        {
+                            Console.WriteLine("  Failed to create supplier account.");
+                            return;
+                        }
+                        Console.WriteLine($"  Supplier '{supplierRef}' created.");
+                    }
+                    else
+                    {
+                        Console.WriteLine($"  Supplier '{supplierRef}' not found. Use -auto to create.");
+                        return;
+                    }
                 }
 
                 // Use TransactionPost TYPE=6 (PI) - same approach as sales invoice TYPE=1 (SI)
@@ -227,7 +296,7 @@ class Program
                     netAmount: 50.00m,
                     taxAmount: 10.00m,
                     nominalCode: "5000",  // Cost of sales - purchase nominals start at 5xxx
-                    details: "Test purchase invoice - Belgium to GB",
+                    details: "Test purchase invoice",
                     taxCode: "T1");
 
                 if (success)
@@ -435,8 +504,8 @@ class Program
                 Console.WriteLine("  discover - Discover available SDK posting objects");
                 Console.WriteLine("");
                 Console.WriteLine("  Invoice Posting (updates ledger balances):");
-                Console.WriteLine("  sinv     - Post sales invoice (updates customer balance)");
-                Console.WriteLine("  pinv     - Post purchase invoice (updates supplier balance)");
+                Console.WriteLine("  sinv [acct] [-auto] - Post sales invoice (creates customer if -auto)");
+                Console.WriteLine("  pinv [acct] [-auto] - Post purchase invoice (creates supplier if -auto)");
                 Console.WriteLine("");
                 Console.WriteLine("  Order Processing (creates documents only, no ledger update):");
                 Console.WriteLine("  invdoc   - Create invoice document via InvoicePost");
