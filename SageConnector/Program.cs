@@ -72,22 +72,58 @@ class Program
                     {
                         Console.WriteLine("Usage: sdk install <accdata_path> [-force]");
                         Console.WriteLine("Detects version and installs appropriate SDK");
-                        Console.WriteLine("  -force: Skip 'already registered' check");
+                        Console.WriteLine("  -force: Re-download even if already extracted");
                         return;
                     }
                     SdkManager.EnsureSdkAsync(instPath, forceInstall).GetAwaiter().GetResult();
+                    break;
+
+                case "test":
+                    // Test registration-free COM by forcing it even if registered COM exists
+                    var testPath = args.Length > 2 ? args[2] : null;
+                    if (string.IsNullOrEmpty(testPath))
+                    {
+                        Console.WriteLine("Usage: sdk test <accdata_path>");
+                        Console.WriteLine("Tests registration-free COM loading (bypasses registered SDK)");
+                        return;
+                    }
+
+                    Console.WriteLine("\n[Testing Registration-Free COM]");
+
+                    // Force extraction even if registered SDK exists
+                    if (!SdkManager.EnsureSdkAsync(testPath, force: true).GetAwaiter().GetResult())
+                    {
+                        Console.WriteLine("Failed to prepare SDK");
+                        return;
+                    }
+
+                    Console.WriteLine($"\n  ExtractedSdkPath: {SdkManager.ExtractedSdkPath}");
+
+                    // Now try to create connection forcing reg-free COM
+                    try
+                    {
+                        Console.WriteLine("\n  Creating SageConnection with forceRegFreeCom=true...");
+                        using var testSage = new SageConnection(forceRegFreeCom: true);
+                        Console.WriteLine("\n  SUCCESS: Registration-free COM is working!");
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"\n  FAILED: {ex.Message}");
+                    }
                     break;
 
                 case "status":
                 default:
                     Console.WriteLine("\n[SDK Status]");
                     Console.WriteLine($"  SDOEngine.32 registered: {SdkManager.IsSdkAvailable()}");
+                    Console.WriteLine($"  Extracted SDK path: {SdkManager.ExtractedSdkPath ?? "(none)"}");
                     Console.WriteLine("\nSDK Commands:");
                     Console.WriteLine("  sdk status              - Check if SDK is available");
                     Console.WriteLine("  sdk list                - List downloadable SDK versions");
                     Console.WriteLine("  sdk detect <path>       - Detect version from ACCDATA");
                     Console.WriteLine("  sdk download <version>  - Download SDK installer");
-                    Console.WriteLine("  sdk install <path>      - Auto-detect and install SDK");
+                    Console.WriteLine("  sdk install <path>      - Auto-detect and extract SDK");
+                    Console.WriteLine("  sdk test <path>         - Test registration-free COM");
                     break;
             }
             return;
@@ -621,8 +657,8 @@ class Program
 /// </summary>
 static class RegFreeCom
 {
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern IntPtr CreateActCtx(ref ACTCTX actctx);
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    private static extern IntPtr CreateActCtxW(ref ACTCTX actctx);
 
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool ActivateActCtx(IntPtr hActCtx, out IntPtr lpCookie);
@@ -633,6 +669,28 @@ static class RegFreeCom
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern void ReleaseActCtx(IntPtr hActCtx);
 
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    private static extern bool SetDllDirectoryW(string lpPathName);
+
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    private static extern int AddDllDirectory(string NewDirectory);
+
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    private static extern IntPtr LoadLibraryW(string lpLibFileName);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool FreeLibrary(IntPtr hModule);
+
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Ansi)]
+    private static extern IntPtr GetProcAddress(IntPtr hModule, string procName);
+
+    // Delegate for DllGetClassObject
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate int DllGetClassObjectDelegate(
+        [MarshalAs(UnmanagedType.LPStruct)] Guid rclsid,
+        [MarshalAs(UnmanagedType.LPStruct)] Guid riid,
+        out IntPtr ppv);
+
     [DllImport("ole32.dll")]
     private static extern int CoCreateInstance(
         [MarshalAs(UnmanagedType.LPStruct)] Guid rclsid,
@@ -641,20 +699,27 @@ static class RegFreeCom
         [MarshalAs(UnmanagedType.LPStruct)] Guid riid,
         out IntPtr ppv);
 
-    private const int ACTCTX_FLAG_ASSEMBLY_DIRECTORY_VALID = 0x004;
+    private const uint ACTCTX_FLAG_ASSEMBLY_DIRECTORY_VALID = 0x004;
     private const uint CLSCTX_INPROC_SERVER = 1;
+    private const IntPtr INVALID_HANDLE_VALUE = -1;
+
+    private static string? _sdkDirectory;
 
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     private struct ACTCTX
     {
         public int cbSize;
         public uint dwFlags;
+        [MarshalAs(UnmanagedType.LPWStr)]
         public string lpSource;
         public ushort wProcessorArchitecture;
         public ushort wLangId;
-        public string lpAssemblyDirectory;
-        public string lpResourceName;
-        public string lpApplicationName;
+        [MarshalAs(UnmanagedType.LPWStr)]
+        public string? lpAssemblyDirectory;
+        [MarshalAs(UnmanagedType.LPWStr)]
+        public string? lpResourceName;
+        [MarshalAs(UnmanagedType.LPWStr)]
+        public string? lpApplicationName;
         public IntPtr hModule;
     }
 
@@ -663,7 +728,7 @@ static class RegFreeCom
     private static string? _manifestPath;
 
     // Known CLSIDs for Sage SDO Engine
-    private static readonly Guid CLSID_SDOEngine = new("8FA9DD12-DBA0-11D1-A59B-00A0C9B18E7F");
+    private static readonly Guid CLSID_SDOEngine = new("2CCBA24E-16DD-4F45-9DA9-C32AD42DF091");
     private static readonly Guid IID_IDispatch = new("00020400-0000-0000-C000-000000000046");
 
     /// <summary>
@@ -678,7 +743,7 @@ static class RegFreeCom
 <assembly xmlns=""urn:schemas-microsoft-com:asm.v1"" manifestVersion=""1.0"">
   <assemblyIdentity type=""win32"" name=""SageSDO"" version=""1.0.0.0"" />
   <file name=""sg50SdoEngine.dll"">
-    <comClass clsid=""{{8FA9DD12-DBA0-11D1-A59B-00A0C9B18E7F}}""
+    <comClass clsid=""{{2CCBA24E-16DD-4F45-9DA9-C32AD42DF091}}""
               threadingModel=""Apartment""
               progid=""SDOEngine.32"" />
     <typelib tlbid=""{{8FA9DD05-DBA0-11D1-A59B-00A0C9B18E7F}}""
@@ -704,22 +769,50 @@ static class RegFreeCom
             return true;
         }
 
+        var assemblyDir = Path.GetDirectoryName(manifestPath);
+        Console.WriteLine($"  Assembly directory: {assemblyDir}");
+
+        // Add SDK directory to DLL search path so dependencies can be found
+        if (!string.IsNullOrEmpty(assemblyDir))
+        {
+            _sdkDirectory = assemblyDir;
+            if (SetDllDirectoryW(assemblyDir))
+            {
+                Console.WriteLine($"  Added to DLL search path: {assemblyDir}");
+            }
+            else
+            {
+                Console.WriteLine($"  SetDllDirectory failed: {Marshal.GetLastWin32Error()}");
+            }
+        }
+
         var actctx = new ACTCTX
         {
             cbSize = Marshal.SizeOf<ACTCTX>(),
             dwFlags = ACTCTX_FLAG_ASSEMBLY_DIRECTORY_VALID,
             lpSource = manifestPath,
-            lpAssemblyDirectory = Path.GetDirectoryName(manifestPath)
+            lpAssemblyDirectory = assemblyDir,
+            lpResourceName = null,
+            lpApplicationName = null,
+            hModule = IntPtr.Zero,
+            wProcessorArchitecture = 0,
+            wLangId = 0
         };
 
-        _actCtx = CreateActCtx(ref actctx);
+        Console.WriteLine($"  ACTCTX.cbSize: {actctx.cbSize}");
+        Console.WriteLine($"  ACTCTX.lpSource: {actctx.lpSource}");
+
+        _actCtx = CreateActCtxW(ref actctx);
         if (_actCtx == IntPtr.Zero || _actCtx == new IntPtr(-1))
         {
             var error = Marshal.GetLastWin32Error();
-            Console.WriteLine($"  CreateActCtx failed with error: {error}");
+            Console.WriteLine($"  CreateActCtxW failed with error: {error}");
+            Console.WriteLine($"  Error description: {new System.ComponentModel.Win32Exception(error).Message}");
             _actCtx = IntPtr.Zero;
             return false;
         }
+
+        Console.WriteLine($"  CreateActCtxW succeeded, handle: {_actCtx}");
 
         if (!ActivateActCtx(_actCtx, out _cookie))
         {
@@ -739,7 +832,62 @@ static class RegFreeCom
     /// </summary>
     public static object? CreateSDOEngine()
     {
-        // Try with activation context first
+        // First try to load the DLL directly to diagnose dependency issues
+        if (!string.IsNullOrEmpty(_sdkDirectory))
+        {
+            var dllPath = Path.Combine(_sdkDirectory, "sg50SdoEngine.dll");
+            Console.WriteLine($"  Attempting to load DLL: {dllPath}");
+
+            var hModule = LoadLibraryW(dllPath);
+            if (hModule == IntPtr.Zero)
+            {
+                var error = Marshal.GetLastWin32Error();
+                Console.WriteLine($"  LoadLibrary failed with error: {error}");
+                Console.WriteLine($"  Error description: {new System.ComponentModel.Win32Exception(error).Message}");
+            }
+            else
+            {
+                Console.WriteLine($"  LoadLibrary succeeded, handle: {hModule}");
+
+                // Try calling DllGetClassObject directly
+                var procAddr = GetProcAddress(hModule, "DllGetClassObject");
+                if (procAddr != IntPtr.Zero)
+                {
+                    Console.WriteLine("  Found DllGetClassObject export");
+
+                    var dllGetClassObject = Marshal.GetDelegateForFunctionPointer<DllGetClassObjectDelegate>(procAddr);
+
+                    // IClassFactory IID
+                    var IID_IClassFactory = new Guid("00000001-0000-0000-C000-000000000046");
+
+                    var hr = dllGetClassObject(CLSID_SDOEngine, IID_IClassFactory, out var pFactory);
+                    Console.WriteLine($"  DllGetClassObject returned: 0x{hr:X8}");
+
+                    if (hr == 0 && pFactory != IntPtr.Zero)
+                    {
+                        Console.WriteLine("  Got class factory, creating instance...");
+
+                        // Get IClassFactory interface and call CreateInstance
+                        var factory = (IClassFactory)Marshal.GetObjectForIUnknown(pFactory);
+                        var iidDispatch = IID_IDispatch; // Copy to local for ref parameter
+                        var instance = factory.CreateInstance(null, ref iidDispatch);
+                        Marshal.Release(pFactory);
+
+                        if (instance != null)
+                        {
+                            Console.WriteLine("  Created SDOEngine via DllGetClassObject");
+                            return instance;
+                        }
+                    }
+                }
+                else
+                {
+                    Console.WriteLine($"  DllGetClassObject not found, error: {Marshal.GetLastWin32Error()}");
+                }
+            }
+        }
+
+        // Try with activation context and CoCreateInstance
         if (_actCtx != IntPtr.Zero)
         {
             try
@@ -784,6 +932,18 @@ static class RegFreeCom
         return null;
     }
 
+    // COM IClassFactory interface
+    [ComImport]
+    [Guid("00000001-0000-0000-C000-000000000046")]
+    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    private interface IClassFactory
+    {
+        [return: MarshalAs(UnmanagedType.Interface)]
+        object CreateInstance([MarshalAs(UnmanagedType.IUnknown)] object? pUnkOuter,
+            ref Guid riid);
+        void LockServer(bool fLock);
+    }
+
     /// <summary>
     /// Deactivate and release the context
     /// </summary>
@@ -799,6 +959,13 @@ static class RegFreeCom
         {
             ReleaseActCtx(_actCtx);
             _actCtx = IntPtr.Zero;
+        }
+
+        // Reset DLL search path
+        if (_sdkDirectory != null)
+        {
+            SetDllDirectoryW("");
+            _sdkDirectory = null;
         }
     }
 
@@ -1156,7 +1323,7 @@ static class SdkManager
     }
 
     /// <summary>
-    /// Extract SDK DLLs from zip file
+    /// Extract SDK DLLs from zip file and MSI
     /// </summary>
     public static bool ExtractSdk(string zipPath, out string? sdkPath)
     {
@@ -1177,34 +1344,80 @@ static class SdkManager
             Directory.Delete(extractDir, true);
         }
 
-        Console.WriteLine($"  Extracting SDK to: {extractDir}");
+        Console.WriteLine($"  Extracting ZIP to: {extractDir}");
 
         try
         {
             ZipFile.ExtractToDirectory(zipPath, extractDir);
             Console.WriteLine("  ZIP extraction successful");
 
-            // List contents
-            var files = Directory.GetFiles(extractDir, "*", SearchOption.AllDirectories);
-            Console.WriteLine($"  Extracted {files.Length} files:");
-            foreach (var file in files.Take(20))
+            // Find the MSI inside the ZIP
+            var msiFile = Directory.GetFiles(extractDir, "*.msi", SearchOption.AllDirectories).FirstOrDefault();
+            if (msiFile != null)
             {
-                Console.WriteLine($"    {Path.GetRelativePath(extractDir, file)}");
-            }
-            if (files.Length > 20)
-                Console.WriteLine($"    ... and {files.Length - 20} more");
+                Console.WriteLine($"  Found MSI: {Path.GetFileName(msiFile)}");
 
-            // Find the SDO DLLs
+                // Extract the MSI to get all dependencies
+                var msiExtractDir = Path.Combine(extractDir, "msi_contents");
+                Console.WriteLine($"  Extracting MSI to: {msiExtractDir}");
+
+                var psi = new ProcessStartInfo
+                {
+                    FileName = "msiexec",
+                    Arguments = $"/a \"{msiFile}\" /qn TARGETDIR=\"{msiExtractDir}\"",
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                };
+
+                using var process = Process.Start(psi);
+                process?.WaitForExit(TimeSpan.FromMinutes(2));
+
+                if (process?.ExitCode == 0)
+                {
+                    Console.WriteLine("  MSI extraction successful");
+
+                    // Find the Sage SDK directory (contains all DLLs)
+                    var sageDlls = Directory.GetFiles(msiExtractDir, "sg50SdoEngine.dll", SearchOption.AllDirectories);
+                    if (sageDlls.Length > 0)
+                    {
+                        sdkPath = Path.GetDirectoryName(sageDlls[0]);
+                        ExtractedSdkPath = sdkPath;
+
+                        // Count DLLs for verification
+                        var dllCount = Directory.GetFiles(sdkPath!, "*.dll").Length;
+                        Console.WriteLine($"  SDK DLLs found at: {sdkPath} ({dllCount} DLLs)");
+
+                        // List key DLLs
+                        var keyDlls = new[] { "sg50SdoEngine.dll", "sg50BusinessObjectsV32.dll", "sg50DataObjectsV32.dll", "Sage.UtilsLibV32.dll" };
+                        foreach (var dll in keyDlls)
+                        {
+                            var exists = File.Exists(Path.Combine(sdkPath!, dll));
+                            Console.WriteLine($"    {dll}: {(exists ? "OK" : "MISSING")}");
+                        }
+
+                        // Create manifest for registration-free COM
+                        RegFreeCom.CreateManifest(sageDlls[0]);
+                        Console.WriteLine($"  SDK ready for registration-free COM");
+                        return true;
+                    }
+                }
+                else
+                {
+                    Console.WriteLine($"  MSI extraction failed with exit code: {process?.ExitCode}");
+                }
+            }
+
+            // Fallback: Look directly in ZIP extraction
+            var files = Directory.GetFiles(extractDir, "*", SearchOption.AllDirectories);
+            Console.WriteLine($"  Extracted {files.Length} files from ZIP");
+
             var sdoDll = files.FirstOrDefault(f => Path.GetFileName(f).Equals("sg50SdoEngine.dll", StringComparison.OrdinalIgnoreCase));
             if (sdoDll != null)
             {
                 sdkPath = Path.GetDirectoryName(sdoDll);
                 ExtractedSdkPath = sdkPath;
                 Console.WriteLine($"  SDK DLLs found at: {sdkPath}");
-
-                // Create manifest for registration-free COM
-                var manifestPath = RegFreeCom.CreateManifest(sdoDll);
-                Console.WriteLine($"  SDK ready for registration-free COM");
+                RegFreeCom.CreateManifest(sdoDll);
                 return true;
             }
 
@@ -1398,50 +1611,76 @@ class SageConnection : IDisposable
     private bool _disposed;
     private bool _usingRegFreeCom;
 
-    public SageConnection()
+    /// <summary>
+    /// Create SageConnection
+    /// </summary>
+    /// <param name="forceRegFreeCom">Force using registration-free COM even if registered COM exists</param>
+    public SageConnection(bool forceRegFreeCom = false)
     {
-        // Try different Sage COM objects (registered)
-        string[] progIds = new[]
-        {
-            "SDOEngine.32",
-            "SDOEngine",
-            "SageDataObject50.SDOEngine",
-            "Sage.Accounts.SDOEngine"
-        };
-
         Type? sdoEngineType = null;
         string? usedProgId = null;
 
-        foreach (var progId in progIds)
+        // Try registered COM first (unless forced to use reg-free)
+        if (!forceRegFreeCom)
         {
-            sdoEngineType = Type.GetTypeFromProgID(progId);
-            if (sdoEngineType != null)
+            string[] progIds = new[]
             {
-                usedProgId = progId;
-                Console.WriteLine($"Found registered COM object: {progId}");
-                break;
+                "SDOEngine.32",
+                "SDOEngine",
+                "SageDataObject50.SDOEngine",
+                "Sage.Accounts.SDOEngine"
+            };
+
+            foreach (var progId in progIds)
+            {
+                sdoEngineType = Type.GetTypeFromProgID(progId);
+                if (sdoEngineType != null)
+                {
+                    usedProgId = progId;
+                    Console.WriteLine($"Found registered COM object: {progId}");
+                    break;
+                }
             }
         }
+        else
+        {
+            Console.WriteLine("Forcing registration-free COM mode...");
+        }
 
-        // If no registered COM, try registration-free COM with extracted SDK
+        // If no registered COM (or forced), try registration-free COM with extracted SDK
         if (sdoEngineType == null)
         {
-            Console.WriteLine("No registered SDK found, trying registration-free COM...");
+            if (!forceRegFreeCom)
+                Console.WriteLine("No registered SDK found, trying registration-free COM...");
 
             if (!string.IsNullOrEmpty(SdkManager.ExtractedSdkPath))
             {
                 var manifestPath = RegFreeCom.ManifestPath
                     ?? Path.Combine(SdkManager.ExtractedSdkPath, "SageSDO.manifest");
 
-                if (File.Exists(manifestPath) && RegFreeCom.Activate(manifestPath))
+                Console.WriteLine($"  Manifest path: {manifestPath}");
+                Console.WriteLine($"  Manifest exists: {File.Exists(manifestPath)}");
+
+                if (File.Exists(manifestPath))
                 {
-                    _sdoEngine = RegFreeCom.CreateSDOEngine();
-                    if (_sdoEngine != null)
+                    if (RegFreeCom.Activate(manifestPath))
                     {
-                        _usingRegFreeCom = true;
-                        Console.WriteLine("SDO Engine created via registration-free COM.");
+                        _sdoEngine = RegFreeCom.CreateSDOEngine();
+                        if (_sdoEngine != null)
+                        {
+                            _usingRegFreeCom = true;
+                            Console.WriteLine("SDO Engine created via registration-free COM.");
+                        }
                     }
                 }
+                else
+                {
+                    Console.WriteLine("  Manifest not found - run 'sdk install' first");
+                }
+            }
+            else
+            {
+                Console.WriteLine("  No extracted SDK path set - run 'sdk install' first");
             }
 
             if (_sdoEngine == null)

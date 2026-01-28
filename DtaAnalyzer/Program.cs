@@ -1,13 +1,15 @@
 using System.Text;
 using System.Text.RegularExpressions;
+using PeNet;
 
 /// <summary>
-/// Sage 50 DTA File Analyzer CLI
+/// Sage 50 DTA/PE File Analyzer CLI
 /// Usage:
 ///   DtaAnalyzer <accdata_path>           - Full analysis of all DTA files
 ///   DtaAnalyzer <accdata_path> scan      - Quick scan for version markers
 ///   DtaAnalyzer <file.dta> dump          - Hex dump of specific file
 ///   DtaAnalyzer <file.dta> guids         - Extract all GUIDs from file
+///   DtaAnalyzer <file.dll> pe            - Analyze PE file (imports, exports, COM)
 ///   DtaAnalyzer <accdata_path> fingerprint - Generate version fingerprint
 /// </summary>
 class Program
@@ -40,8 +42,20 @@ class Program
                 case "structure":
                     AnalyzeStructure(path);
                     break;
+                case "pe":
+                    AnalyzePE(path);
+                    break;
                 default:
-                    AnalyzeStructure(path);
+                    // Auto-detect: if it's a PE file, use PE analysis
+                    if (path.EndsWith(".dll", StringComparison.OrdinalIgnoreCase) ||
+                        path.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
+                    {
+                        AnalyzePE(path);
+                    }
+                    else
+                    {
+                        AnalyzeStructure(path);
+                    }
                     break;
             }
         }
@@ -72,8 +86,8 @@ class Program
 
     static void ShowHelp()
     {
-        Console.WriteLine("Sage 50 DTA File Analyzer");
-        Console.WriteLine("========================");
+        Console.WriteLine("Sage 50 DTA/PE File Analyzer");
+        Console.WriteLine("============================");
         Console.WriteLine();
         Console.WriteLine("Usage:");
         Console.WriteLine("  DtaAnalyzer <accdata_path>              Full analysis of ACCDATA");
@@ -83,7 +97,134 @@ class Program
         Console.WriteLine("  DtaAnalyzer <file.dta> dump [bytes]     Hex dump (default 256 bytes)");
         Console.WriteLine("  DtaAnalyzer <file.dta> guids            Extract GUIDs from file");
         Console.WriteLine("  DtaAnalyzer <file.dta> strings          Extract ASCII strings");
+        Console.WriteLine("  DtaAnalyzer <file.dll> pe               Analyze PE (imports/exports/COM)");
         Console.WriteLine("  DtaAnalyzer <file.dta> structure        Analyze file structure");
+    }
+
+    static void AnalyzePE(string filePath)
+    {
+        Console.WriteLine($"PE Analysis of {Path.GetFileName(filePath)}");
+        Console.WriteLine(new string('=', 60));
+
+        try
+        {
+            var pe = new PeFile(filePath);
+
+            // Basic info
+            Console.WriteLine("\n[Basic Info]");
+            Console.WriteLine($"  File: {Path.GetFileName(filePath)}");
+            Console.WriteLine($"  Size: {new FileInfo(filePath).Length:N0} bytes");
+            Console.WriteLine($"  Is 64-bit: {pe.Is64Bit}");
+            Console.WriteLine($"  Is DLL: {pe.IsDll}");
+
+            // Machine type
+            if (pe.ImageNtHeaders?.FileHeader != null)
+            {
+                Console.WriteLine($"  Machine: {pe.ImageNtHeaders.FileHeader.Machine}");
+                Console.WriteLine($"  Characteristics: {pe.ImageNtHeaders.FileHeader.Characteristics}");
+            }
+
+            // Imports (Dependencies)
+            Console.WriteLine("\n[Imported DLLs (Dependencies)]");
+            if (pe.ImportedFunctions != null && pe.ImportedFunctions.Length > 0)
+            {
+                var dllGroups = pe.ImportedFunctions.GroupBy(f => f.DLL).OrderBy(g => g.Key);
+                foreach (var dll in dllGroups)
+                {
+                    Console.WriteLine($"\n  {dll.Key} ({dll.Count()} functions):");
+                    foreach (var func in dll.Take(10))
+                    {
+                        Console.WriteLine($"    - {func.Name ?? $"Ordinal {func.Hint}"}");
+                    }
+                    if (dll.Count() > 10)
+                        Console.WriteLine($"    ... and {dll.Count() - 10} more");
+                }
+            }
+            else
+            {
+                Console.WriteLine("  No imports found");
+            }
+
+            // Exports
+            Console.WriteLine("\n[Exported Functions]");
+            if (pe.ExportedFunctions != null && pe.ExportedFunctions.Length > 0)
+            {
+                Console.WriteLine($"  Total exports: {pe.ExportedFunctions.Length}");
+                foreach (var func in pe.ExportedFunctions.Take(20))
+                {
+                    Console.WriteLine($"    - {func.Name ?? $"Ordinal {func.Ordinal}"}");
+                }
+                if (pe.ExportedFunctions.Length > 20)
+                    Console.WriteLine($"    ... and {pe.ExportedFunctions.Length - 20} more");
+            }
+            else
+            {
+                Console.WriteLine("  No exports found");
+            }
+
+            // COM/TypeLib info from resources
+            Console.WriteLine("\n[Resources / Version Info]");
+            if (pe.Resources?.VsVersionInfo != null)
+            {
+                var vi = pe.Resources.VsVersionInfo;
+                Console.WriteLine("  Version info present: Yes");
+
+                if (vi.StringFileInfo?.StringTable != null)
+                {
+                    foreach (var table in vi.StringFileInfo.StringTable)
+                    {
+                        if (table.FileDescription != null)
+                            Console.WriteLine($"  Description: {table.FileDescription}");
+                        if (table.CompanyName != null)
+                            Console.WriteLine($"  Company: {table.CompanyName}");
+                        if (table.ProductName != null)
+                            Console.WriteLine($"  Product: {table.ProductName}");
+                        if (table.InternalName != null)
+                            Console.WriteLine($"  Internal Name: {table.InternalName}");
+                        if (table.OriginalFilename != null)
+                            Console.WriteLine($"  Original Filename: {table.OriginalFilename}");
+                        if (table.FileVersion != null)
+                            Console.WriteLine($"  File Version: {table.FileVersion}");
+                    }
+                }
+            }
+
+            // Look for type library embedded
+            Console.WriteLine("\n[Type Library / COM Registration]");
+            if (pe.ImageResourceDirectory != null)
+            {
+                Console.WriteLine("  Has resource directory: Yes");
+            }
+
+            // Look for DllRegisterServer export (COM DLL marker)
+            var hasDllRegisterServer = pe.ExportedFunctions?.Any(f =>
+                f.Name?.Equals("DllRegisterServer", StringComparison.OrdinalIgnoreCase) == true) ?? false;
+            var hasDllGetClassObject = pe.ExportedFunctions?.Any(f =>
+                f.Name?.Equals("DllGetClassObject", StringComparison.OrdinalIgnoreCase) == true) ?? false;
+
+            Console.WriteLine($"  DllRegisterServer: {(hasDllRegisterServer ? "Yes (COM DLL)" : "No")}");
+            Console.WriteLine($"  DllGetClassObject: {(hasDllGetClassObject ? "Yes (COM class factory)" : "No")}");
+
+            if (hasDllGetClassObject)
+            {
+                Console.WriteLine("\n  This is a COM DLL that can be loaded without registration");
+                Console.WriteLine("  using DllGetClassObject to obtain the class factory.");
+            }
+
+            // Sections
+            Console.WriteLine("\n[PE Sections]");
+            if (pe.ImageSectionHeaders != null)
+            {
+                foreach (var section in pe.ImageSectionHeaders)
+                {
+                    Console.WriteLine($"  {section.Name,-8} VSize: {section.VirtualSize,10:N0}  Raw: {section.SizeOfRawData,10:N0}");
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error analyzing PE: {ex.Message}");
+        }
     }
 
     static void HexDump(string filePath, int bytes)
