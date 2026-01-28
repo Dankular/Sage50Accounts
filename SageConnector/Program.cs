@@ -1,6 +1,7 @@
 using System.Runtime.InteropServices;
 using System.Reflection;
 using System.Diagnostics;
+using System.IO.Compression;
 
 namespace SageConnector;
 
@@ -66,13 +67,15 @@ class Program
 
                 case "install":
                     var instPath = args.Length > 2 ? args[2] : null;
+                    var forceInstall = args.Any(a => a.Equals("-force", StringComparison.OrdinalIgnoreCase));
                     if (string.IsNullOrEmpty(instPath))
                     {
-                        Console.WriteLine("Usage: sdk install <accdata_path>");
+                        Console.WriteLine("Usage: sdk install <accdata_path> [-force]");
                         Console.WriteLine("Detects version and installs appropriate SDK");
+                        Console.WriteLine("  -force: Skip 'already registered' check");
                         return;
                     }
-                    SdkManager.EnsureSdkAsync(instPath).GetAwaiter().GetResult();
+                    SdkManager.EnsureSdkAsync(instPath, forceInstall).GetAwaiter().GetResult();
                     break;
 
                 case "status":
@@ -883,7 +886,7 @@ static class SdkManager
     }
 
     /// <summary>
-    /// Download SDK installer to cache directory
+    /// Download SDK zip to cache directory
     /// </summary>
     public static async Task<string?> DownloadSdkAsync(string version, bool prefer64Bit = true)
     {
@@ -896,7 +899,7 @@ static class SdkManager
 
         Directory.CreateDirectory(SdkCacheDir);
         var bitness = prefer64Bit ? "x64" : "x86";
-        var fileName = $"SageSDO_v{version}_{bitness}.exe";
+        var fileName = $"SageSDO_v{version}_{bitness}.zip";
         var filePath = Path.Combine(SdkCacheDir, fileName);
 
         if (File.Exists(filePath))
@@ -950,69 +953,166 @@ static class SdkManager
     }
 
     /// <summary>
-    /// Install/register SDK (runs the downloaded installer silently)
+    /// Extract SDK DLLs from zip file
     /// </summary>
-    public static bool InstallSdk(string installerPath)
+    public static bool ExtractSdk(string zipPath, out string? sdkPath)
     {
-        if (!File.Exists(installerPath))
+        sdkPath = null;
+        if (!File.Exists(zipPath))
         {
-            Console.WriteLine($"  Installer not found: {installerPath}");
+            Console.WriteLine($"  ZIP not found: {zipPath}");
             return false;
         }
 
-        Console.WriteLine($"  Installing SDK from: {installerPath}");
-        Console.WriteLine("  (This may require administrator privileges)");
+        var extractDir = Path.Combine(Path.GetDirectoryName(zipPath)!,
+            Path.GetFileNameWithoutExtension(zipPath));
+
+        // Clean existing extraction
+        if (Directory.Exists(extractDir))
+        {
+            Console.WriteLine($"  Cleaning existing extraction: {extractDir}");
+            Directory.Delete(extractDir, true);
+        }
+
+        Console.WriteLine($"  Extracting SDK to: {extractDir}");
+
+        try
+        {
+            ZipFile.ExtractToDirectory(zipPath, extractDir);
+            Console.WriteLine("  ZIP extraction successful");
+
+            // List contents
+            var files = Directory.GetFiles(extractDir, "*", SearchOption.AllDirectories);
+            Console.WriteLine($"  Extracted {files.Length} files:");
+            foreach (var file in files.Take(20))
+            {
+                Console.WriteLine($"    {Path.GetRelativePath(extractDir, file)}");
+            }
+            if (files.Length > 20)
+                Console.WriteLine($"    ... and {files.Length - 20} more");
+
+            // Find the SDO DLLs
+            var sdoDll = files.FirstOrDefault(f => Path.GetFileName(f).Equals("sg50SdoEngine.dll", StringComparison.OrdinalIgnoreCase));
+            if (sdoDll != null)
+            {
+                sdkPath = Path.GetDirectoryName(sdoDll);
+                Console.WriteLine($"  SDK DLLs found at: {sdkPath}");
+                return true;
+            }
+
+            // Try to find type library
+            var tlbFile = files.FirstOrDefault(f => f.EndsWith(".tlb", StringComparison.OrdinalIgnoreCase));
+            if (tlbFile != null)
+            {
+                sdkPath = Path.GetDirectoryName(tlbFile);
+                Console.WriteLine($"  SDK type library found at: {sdkPath}");
+                return true;
+            }
+
+            // Just return the extract dir if we got files
+            if (files.Length > 0)
+            {
+                sdkPath = extractDir;
+                Console.WriteLine("  SDK DLLs not found but extraction succeeded");
+                return true;
+            }
+
+            Console.WriteLine("  Extraction succeeded but no files found");
+            return false;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  ZIP extraction failed: {ex.Message}");
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Install/register SDK - extracts zip and registers DLLs
+    /// </summary>
+    public static bool InstallSdk(string zipPath)
+    {
+        if (!ExtractSdk(zipPath, out var sdkPath) || sdkPath == null)
+        {
+            Console.WriteLine("  SDK extraction failed");
+            return false;
+        }
+
+        // Try to register the COM DLLs
+        return RegisterSdkDlls(sdkPath);
+    }
+
+    private static bool RegisterSdkDlls(string sdkPath)
+    {
+        Console.WriteLine($"  Looking for SDK DLLs in: {sdkPath}");
+
+        // Find sg50SdoEngine.dll recursively
+        var sdoDll = Directory.GetFiles(sdkPath, "sg50SdoEngine.dll", SearchOption.AllDirectories)
+            .FirstOrDefault();
+
+        if (sdoDll == null)
+        {
+            Console.WriteLine("  sg50SdoEngine.dll not found");
+            Console.WriteLine("  Available DLLs:");
+            foreach (var dll in Directory.GetFiles(sdkPath, "*.dll", SearchOption.AllDirectories).Take(10))
+            {
+                Console.WriteLine($"    {Path.GetFileName(dll)}");
+            }
+            return false;
+        }
+
+        Console.WriteLine($"  Found: {sdoDll}");
+        Console.WriteLine($"  Registering COM DLL (requires admin)...");
 
         try
         {
             var psi = new ProcessStartInfo
             {
-                FileName = installerPath,
-                Arguments = "/quiet /norestart", // Silent install
+                FileName = "regsvr32",
+                Arguments = $"/s \"{sdoDll}\"",
                 UseShellExecute = true,
-                Verb = "runas" // Run as admin
+                Verb = "runas"
             };
 
             using var process = Process.Start(psi);
-            if (process == null)
-            {
-                Console.WriteLine("  Failed to start installer");
-                return false;
-            }
+            process?.WaitForExit(TimeSpan.FromSeconds(30));
 
-            process.WaitForExit(TimeSpan.FromMinutes(5));
-
-            if (process.ExitCode == 0)
+            if (process?.ExitCode == 0)
             {
-                Console.WriteLine("  SDK installed successfully");
+                Console.WriteLine("  COM DLL registered successfully");
                 return true;
             }
             else
             {
-                Console.WriteLine($"  Installer exited with code: {process.ExitCode}");
-                return false;
+                Console.WriteLine($"  regsvr32 exited with code: {process?.ExitCode}");
             }
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"  Installation failed: {ex.Message}");
-            return false;
+            Console.WriteLine($"  Registration failed: {ex.Message}");
         }
+
+        return false;
     }
 
     /// <summary>
     /// Ensure SDK is available for the detected version
     /// Downloads and installs if necessary
     /// </summary>
-    public static async Task<bool> EnsureSdkAsync(string accDataPath)
+    public static async Task<bool> EnsureSdkAsync(string accDataPath, bool force = false)
     {
         Console.WriteLine("\n[SDK Manager]");
 
         // Check if SDK is already registered
-        if (IsSdkAvailable())
+        if (!force && IsSdkAvailable())
         {
             Console.WriteLine("  SDK already available (SDOEngine.32 registered)");
             return true;
+        }
+
+        if (force)
+        {
+            Console.WriteLine("  Force mode: skipping registration check");
         }
 
         // Detect version from ACCDATA
