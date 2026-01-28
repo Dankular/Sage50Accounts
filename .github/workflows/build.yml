@@ -1,0 +1,40 @@
+name: Build and Test
+
+on:
+  push:
+    branches: [ master, main ]
+  pull_request:
+    branches: [ master, main ]
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: 9.0.x
+
+    - name: Restore dependencies
+      run: dotnet restore
+
+    - name: Build SageConnector
+      run: dotnet build SageConnector/SageConnector.csproj --configuration Release --no-restore
+
+    - name: Build DtaAnalyzer
+      run: dotnet build DtaAnalyzer/DtaAnalyzer.csproj --configuration Release --no-restore
+
+    - name: Upload SageConnector artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: SageConnector
+        path: SageConnector/bin/Release/net9.0-windows/
+
+    - name: Upload DtaAnalyzer artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: DtaAnalyzer
+        path: DtaAnalyzer/bin/Release/net9.0/
