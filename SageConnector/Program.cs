@@ -16,7 +16,7 @@ namespace SageConnector;
 /// </summary>
 class Program
 {
-    static void Main(string[] args)
+    static async Task Main(string[] args)
     {
         Console.WriteLine("Sage 50 SDO Connector");
         Console.WriteLine(new string('=', 50));
@@ -126,6 +126,50 @@ class Program
                     Console.WriteLine("  sdk test <path>         - Test registration-free COM");
                     break;
             }
+            return;
+        }
+
+        // API server command
+        if (args.Length > 0 && args[0].Equals("serve", StringComparison.OrdinalIgnoreCase))
+        {
+            var dataPath = args.Length > 1 ? args[1] : null;
+            var username = args.Length > 2 ? args[2] : "manager";
+            var password = args.Length > 3 ? args[3] : "";
+            var port = 5000;
+
+            // Parse optional --port flag
+            var portIdx = Array.FindIndex(args, a => a.StartsWith("--port=", StringComparison.OrdinalIgnoreCase));
+            if (portIdx >= 0)
+            {
+                var portStr = args[portIdx].Split('=')[1];
+                if (int.TryParse(portStr, out var p)) port = p;
+            }
+
+            if (string.IsNullOrEmpty(dataPath))
+            {
+                Console.WriteLine("Usage: SageConnector.exe serve <accdata_path> [username] [password] [--port=5000]");
+                Console.WriteLine("Example: SageConnector.exe serve \"X:\\ACCDATA\" manager \"\" --port=8080");
+                return;
+            }
+
+            try
+            {
+                using var server = new ApiServer(dataPath, username, password, port);
+                using var cts = new CancellationTokenSource();
+
+                Console.CancelKeyPress += (s, e) =>
+                {
+                    e.Cancel = true;
+                    cts.Cancel();
+                };
+
+                await server.StartAsync(cts.Token);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error starting API server: {ex.Message}");
+            }
+
             return;
         }
 
@@ -2076,6 +2120,40 @@ class SageConnection : IDisposable
                 Console.WriteLine($"  Data Path: X:\\ACCDATA");
             }
             catch { }
+        }
+    }
+
+    /// <summary>
+    /// Get company information as a structured response
+    /// </summary>
+    public CompanyInfoResponse? GetCompanyInfo()
+    {
+        if (_workspace == null) return null;
+
+        try
+        {
+            var setupData = InvokeComMethod(_workspace, "CreateObject", "SetupData");
+            if (setupData == null) return null;
+
+            InvokeComMethod(setupData, "Open", 0); // 0 = read mode
+
+            var info = new CompanyInfoResponse(
+                Name: GetFieldValue(setupData, "NAME")?.ToString() ?? "",
+                Address1: GetFieldValue(setupData, "ADDRESS_1")?.ToString(),
+                Address2: GetFieldValue(setupData, "ADDRESS_2")?.ToString(),
+                Address3: GetFieldValue(setupData, "ADDRESS_3")?.ToString(),
+                Postcode: GetFieldValue(setupData, "ADDRESS_5")?.ToString(), // Postcode is often field 5
+                Telephone: GetFieldValue(setupData, "TELEPHONE")?.ToString(),
+                VatNumber: GetFieldValue(setupData, "VAT_REG_NUMBER")?.ToString()
+            );
+
+            InvokeComMethod(setupData, "Close");
+            return info;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  GetCompanyInfo error: {ex.Message}");
+            return null;
         }
     }
 
@@ -4291,6 +4369,53 @@ class SageConnection : IDisposable
     }
 
     /// <summary>
+    /// Get nominal codes as a list
+    /// </summary>
+    public List<NominalCode> GetNominalCodes(int maxCount = 100)
+    {
+        var nominals = new List<NominalCode>();
+        if (_workspace == null) return nominals;
+
+        try
+        {
+            var nominalRecord = InvokeComMethod(_workspace, "CreateObject", "NominalRecord");
+            if (nominalRecord == null) return nominals;
+
+            InvokeComMethod(nominalRecord, "MoveFirst");
+            int count = 0;
+
+            while (count < maxCount)
+            {
+                var eof = InvokeComMethod(nominalRecord, "IsEOF");
+                if (eof != null && (bool)eof) break;
+
+                var code = GetFieldValue(nominalRecord, "ACCOUNT_REF")?.ToString() ?? "";
+                var name = GetFieldValue(nominalRecord, "NAME")?.ToString() ?? "";
+                var balance = Convert.ToDecimal(GetFieldValue(nominalRecord, "BALANCE") ?? 0m);
+
+                if (!string.IsNullOrEmpty(code))
+                {
+                    nominals.Add(new NominalCode
+                    {
+                        Code = code,
+                        Name = name,
+                        Balance = balance
+                    });
+                }
+
+                InvokeComMethod(nominalRecord, "MoveNext");
+                count++;
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  GetNominalCodes error: {ex.Message}");
+        }
+
+        return nominals;
+    }
+
+    /// <summary>
     /// Create a new nominal code
     /// </summary>
     public bool CreateNominal(string nominalCode, string name)
@@ -4889,4 +5014,14 @@ public class JournalLine
     public decimal Credit { get; set; }
     public string TaxCode { get; set; } = "T9"; // T9 = no VAT by default for journals
     public DateTime? Date { get; set; }
+}
+
+/// <summary>
+/// Represents a nominal code/account from Nominal Ledger
+/// </summary>
+public class NominalCode
+{
+    public string Code { get; set; } = "";
+    public string Name { get; set; } = "";
+    public decimal Balance { get; set; }
 }

@@ -1,21 +1,19 @@
 # Sage 50 Accounts SDK Tools
 
-C# console application for interacting with Sage 50 Accounts (UK) via the SDO (Sage Data Objects) COM interface.
+C# console application and REST API for interacting with Sage 50 Accounts (UK) via the SDO (Sage Data Objects) COM interface.
 
 **No Sage 50 Accounts SDO installation required** - The SDK is automatically downloaded and loaded without COM registration.
 
-## SageConnector
+## Features
 
-A console application that connects to Sage 50 Accounts and provides:
-
+- **REST API Server** - HTTP API with Swagger/OpenAPI documentation
 - **Post sales invoices to ledger** - Direct posting via TransactionPost (updates customer balances)
 - **Post purchase invoices** - Via TransactionPost (with limitations, see below)
 - **Create customers/suppliers** - Add accounts to Sales/Purchase ledgers
 - **Search accounts** - Find customers/suppliers by name or account reference
-- **Read company information** - View company setup data (294 fields)
+- **Read company information** - View company setup data
 - **List customers/suppliers** - Browse ledger accounts with balances
-- **List invoices** - View recent invoice records with details
-- **Create invoice documents** - Via InvoicePost/SopPost (order processing system)
+- **Post journals and bank transactions** - Direct nominal ledger posting
 
 ## Requirements
 
@@ -102,6 +100,86 @@ SageConnector.exe sdk test "X:\ACCDATA"
 5. Creates COM objects via `DllGetClassObject` (no registration)
 
 SDK files are cached in `%LOCALAPPDATA%\SageConnector\SDK\`.
+
+## HTTP API Server
+
+Start the REST API server to access Sage 50 via HTTP:
+
+```bash
+# Start API server on default port 5000
+SageConnector.exe serve "X:\ACCDATA" manager password
+
+# Start on custom port
+SageConnector.exe serve "X:\ACCDATA" manager password --port=8080
+```
+
+### API Endpoints
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/swagger.json` | OpenAPI 3.0 specification |
+| GET | `/api/company` | Get company information |
+| GET | `/api/customers` | List customers (?search=&limit=) |
+| GET | `/api/customers/{ref}` | Get customer by account ref |
+| POST | `/api/customers` | Create new customer |
+| GET | `/api/customers/{ref}/exists` | Check if customer exists |
+| GET | `/api/suppliers` | List suppliers |
+| GET | `/api/suppliers/{ref}` | Get supplier by account ref |
+| POST | `/api/suppliers` | Create new supplier |
+| POST | `/api/sales/invoice` | Post sales invoice to ledger |
+| POST | `/api/sales/credit` | Post sales credit note |
+| POST | `/api/purchases/invoice` | Post purchase invoice |
+| POST | `/api/purchases/credit` | Post purchase credit note |
+| GET | `/api/nominals` | List nominal codes |
+| POST | `/api/nominals` | Create nominal code |
+| POST | `/api/bank/payment` | Post bank payment |
+| POST | `/api/bank/receipt` | Post bank receipt |
+| POST | `/api/journals` | Post journal entry |
+| POST | `/api/journals/simple` | Post simple two-line journal |
+
+### Example API Calls
+
+```bash
+# Get company info
+curl http://localhost:5000/api/company
+
+# List customers
+curl http://localhost:5000/api/customers?search=falcon&limit=10
+
+# Create a customer
+curl -X POST http://localhost:5000/api/customers \
+  -H "Content-Type: application/json" \
+  -d '{"accountRef":"TEST01","name":"Test Customer Ltd","postcode":"AB1 2CD"}'
+
+# Post a sales invoice
+curl -X POST http://localhost:5000/api/sales/invoice \
+  -H "Content-Type: application/json" \
+  -d '{"customerAccount":"TEST01","netAmount":100,"taxAmount":20,"nominalCode":"4000"}'
+
+# Get OpenAPI spec
+curl http://localhost:5000/api/swagger.json
+```
+
+### Response Format
+
+All responses use a consistent JSON format:
+
+```json
+{
+  "success": true,
+  "data": { ... },
+  "error": null
+}
+```
+
+On error:
+```json
+{
+  "success": false,
+  "data": null,
+  "error": "Error message here"
+}
+```
 
 ## Code Examples
 
