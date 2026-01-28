@@ -27,6 +27,68 @@ class Program
             return;
         }
 
+        // SDK management commands (don't require connection)
+        if (args.Length > 0 && args[0].Equals("sdk", StringComparison.OrdinalIgnoreCase))
+        {
+            var subCmd = args.Length > 1 ? args[1].ToLowerInvariant() : "status";
+
+            switch (subCmd)
+            {
+                case "list":
+                    SdkManager.ListAvailableVersions();
+                    break;
+
+                case "detect":
+                    var detectPath = args.Length > 2 ? args[2] : null;
+                    if (string.IsNullOrEmpty(detectPath))
+                    {
+                        Console.WriteLine("Usage: sdk detect <accdata_path>");
+                        return;
+                    }
+                    var version = SdkManager.DetectVersion(detectPath);
+                    if (version != null)
+                    {
+                        var url = SdkManager.GetDownloadUrl(version);
+                        Console.WriteLine($"\nDownload URL: {url}");
+                    }
+                    break;
+
+                case "download":
+                    var dlVersion = args.Length > 2 ? args[2] : null;
+                    if (string.IsNullOrEmpty(dlVersion))
+                    {
+                        Console.WriteLine("Usage: sdk download <version>");
+                        Console.WriteLine("Example: sdk download 32.0");
+                        return;
+                    }
+                    SdkManager.DownloadSdkAsync(dlVersion).GetAwaiter().GetResult();
+                    break;
+
+                case "install":
+                    var instPath = args.Length > 2 ? args[2] : null;
+                    if (string.IsNullOrEmpty(instPath))
+                    {
+                        Console.WriteLine("Usage: sdk install <accdata_path>");
+                        Console.WriteLine("Detects version and installs appropriate SDK");
+                        return;
+                    }
+                    SdkManager.EnsureSdkAsync(instPath).GetAwaiter().GetResult();
+                    break;
+
+                case "status":
+                default:
+                    Console.WriteLine("\n[SDK Status]");
+                    Console.WriteLine($"  SDOEngine.32 registered: {SdkManager.IsSdkAvailable()}");
+                    Console.WriteLine("\nSDK Commands:");
+                    Console.WriteLine("  sdk status              - Check if SDK is available");
+                    Console.WriteLine("  sdk list                - List downloadable SDK versions");
+                    Console.WriteLine("  sdk detect <path>       - Detect version from ACCDATA");
+                    Console.WriteLine("  sdk download <version>  - Download SDK installer");
+                    Console.WriteLine("  sdk install <path>      - Auto-detect and install SDK");
+                    break;
+            }
+            return;
+        }
 
         // Check command line args for company path
         string? companyPath = args.Length > 0 ? args[0] : null;
@@ -542,6 +604,356 @@ class Program
         {
             Console.WriteLine($"\nError: {ex.Message}");
             Console.WriteLine(ex.StackTrace);
+        }
+    }
+}
+
+/// <summary>
+/// Manages Sage 50 SDK detection, download, and loading
+/// Detects version from ACCDATA and downloads appropriate SDK from Sage KB
+/// </summary>
+static class SdkManager
+{
+    private static readonly string SdkCacheDir = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "SageConnector", "SDK");
+
+    /// <summary>
+    /// SDK download URLs from Sage KB article 201224120012523
+    /// </summary>
+    private static readonly Dictionary<string, (string Url64, string Url32)> SdkDownloads = new()
+    {
+        ["33.0"] = ("https://downloads.sage.co.uk/download/?did=3e47ac24-0cff-402d-8232-7a3296a59a01",
+                    "https://downloads.sage.co.uk/download/?did=986d817d-494e-4e7b-9d74-9950f2b576e7"),
+        ["32.1"] = ("https://downloads.sage.co.uk/download/?did=c298b7b7-c5fa-479c-b90d-9c6f61b77a97",
+                    "https://downloads.sage.co.uk/download/?did=e9f67243-1ec0-4dc1-9cb7-ec2fcae20f06"),
+        ["32.0"] = ("https://downloads.sage.co.uk/download/?did=c038d725-22a5-411b-8247-5ee6e1156dba",
+                    "https://downloads.sage.co.uk/download/?did=86a3b851-5eca-4844-8d7f-551a2b19844c"),
+        ["31.1"] = ("https://downloads.sage.co.uk/download/?did=5b98d38c-1497-4aef-baf0-69bf44e3daf6",
+                    "https://downloads.sage.co.uk/download/?did=85c44ae1-8912-448e-b703-583130e0b352"),
+        ["30.1"] = ("https://downloads.sage.co.uk/download/?did=2025c04b-f6a2-4b3b-9a0f-1db020062f90",
+                    "https://downloads.sage.co.uk/download/?did=49d800c3-ff2f-4b63-8ac4-fe354a80b2eb"),
+        ["29.0"] = ("https://downloads.sage.co.uk/download/?did=4ad4deae-b847-458d-9081-e53fde039d3d", ""),
+        ["28.0"] = ("https://downloads.sage.co.uk/download/?did=7e19e237-5bd3-481f-9e2a-f73b2c7e6a2c", ""),
+        ["27.0"] = ("https://downloads.sage.co.uk/download/?did=7a55278e-2294-4349-834f-9141f68686a1", ""),
+        ["26.0"] = ("https://downloads.sage.co.uk/download/?did=f71b5929-1a8f-4c65-82a6-b15a7b01cb7a", ""),
+    };
+
+    /// <summary>
+    /// Detect Sage 50 version from ACCDATA folder
+    /// Reads the HEADER.DTA file which contains version info in its header bytes
+    /// </summary>
+    public static string? DetectVersion(string accDataPath)
+    {
+        if (!Directory.Exists(accDataPath))
+        {
+            Console.WriteLine($"  ACCDATA path not found: {accDataPath}");
+            return null;
+        }
+
+        // Try multiple methods to detect version
+
+        // Method 1: Check HEADER.DTA file signature
+        var headerDta = Path.Combine(accDataPath, "HEADER.DTA");
+        if (File.Exists(headerDta))
+        {
+            try
+            {
+                using var fs = new FileStream(headerDta, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+                var header = new byte[256];
+                fs.Read(header, 0, Math.Min(256, (int)fs.Length));
+
+                // Look for version patterns in header
+                // Sage stores version info typically in first 100 bytes
+                var headerStr = System.Text.Encoding.ASCII.GetString(header);
+
+                // Check for version markers like "V32", "V33", etc.
+                for (int v = 33; v >= 26; v--)
+                {
+                    if (headerStr.Contains($"V{v}") || headerStr.Contains($"v{v}"))
+                    {
+                        Console.WriteLine($"  Detected version from HEADER.DTA: {v}.0");
+                        return $"{v}.0";
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"  Could not read HEADER.DTA: {ex.Message}");
+            }
+        }
+
+        // Method 2: Check SETTINGS.DTA for version info
+        var settingsDta = Path.Combine(accDataPath, "SETTINGS.DTA");
+        if (File.Exists(settingsDta))
+        {
+            try
+            {
+                using var fs = new FileStream(settingsDta, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+                var buffer = new byte[512];
+                fs.Read(buffer, 0, Math.Min(512, (int)fs.Length));
+                var content = System.Text.Encoding.ASCII.GetString(buffer);
+
+                for (int v = 33; v >= 26; v--)
+                {
+                    if (content.Contains($"{v}.") || content.Contains($"V{v}"))
+                    {
+                        Console.WriteLine($"  Detected version from SETTINGS.DTA: {v}.0");
+                        return $"{v}.0";
+                    }
+                }
+            }
+            catch { }
+        }
+
+        // Method 3: Check for ACCDATA version file
+        var versionFile = Path.Combine(accDataPath, "VERSION");
+        if (File.Exists(versionFile))
+        {
+            try
+            {
+                var versionText = File.ReadAllText(versionFile).Trim();
+                Console.WriteLine($"  Detected version from VERSION file: {versionText}");
+                return versionText;
+            }
+            catch { }
+        }
+
+        // Method 4: Infer from parent folder structure (e.g., Accounts/2024)
+        var parentPath = Path.GetDirectoryName(accDataPath);
+        if (parentPath != null)
+        {
+            var yearMatch = System.Text.RegularExpressions.Regex.Match(parentPath, @"(\d{4})");
+            if (yearMatch.Success && int.TryParse(yearMatch.Groups[1].Value, out int year))
+            {
+                // Map year to version: 2024=v32, 2025=v33, etc.
+                int version = year - 1992; // Rough mapping
+                if (version >= 26 && version <= 33)
+                {
+                    Console.WriteLine($"  Inferred version from path year {year}: {version}.0");
+                    return $"{version}.0";
+                }
+            }
+        }
+
+        Console.WriteLine("  Could not detect Sage version from ACCDATA");
+        return null;
+    }
+
+    /// <summary>
+    /// Check if SDK is already available (either registered or cached)
+    /// </summary>
+    public static bool IsSdkAvailable()
+    {
+        var sdoType = Type.GetTypeFromProgID("SDOEngine.32");
+        return sdoType != null;
+    }
+
+    /// <summary>
+    /// Get the download URL for a specific version
+    /// </summary>
+    public static string? GetDownloadUrl(string version, bool prefer64Bit = true)
+    {
+        // Normalize version (e.g., "32" -> "32.0")
+        if (!version.Contains('.'))
+            version = $"{version}.0";
+
+        if (SdkDownloads.TryGetValue(version, out var urls))
+        {
+            var url = prefer64Bit && !string.IsNullOrEmpty(urls.Url64) ? urls.Url64 : urls.Url32;
+            if (!string.IsNullOrEmpty(url))
+                return url;
+        }
+
+        // Try major version only
+        var majorVersion = version.Split('.')[0] + ".0";
+        if (SdkDownloads.TryGetValue(majorVersion, out urls))
+        {
+            return prefer64Bit && !string.IsNullOrEmpty(urls.Url64) ? urls.Url64 : urls.Url32;
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Download SDK installer to cache directory
+    /// </summary>
+    public static async Task<string?> DownloadSdkAsync(string version, bool prefer64Bit = true)
+    {
+        var url = GetDownloadUrl(version, prefer64Bit);
+        if (url == null)
+        {
+            Console.WriteLine($"  No SDK download available for version {version}");
+            return null;
+        }
+
+        Directory.CreateDirectory(SdkCacheDir);
+        var bitness = prefer64Bit ? "x64" : "x86";
+        var fileName = $"SageSDO_v{version}_{bitness}.exe";
+        var filePath = Path.Combine(SdkCacheDir, fileName);
+
+        if (File.Exists(filePath))
+        {
+            Console.WriteLine($"  SDK already downloaded: {filePath}");
+            return filePath;
+        }
+
+        Console.WriteLine($"  Downloading SDK v{version} ({bitness})...");
+        Console.WriteLine($"  URL: {url}");
+
+        try
+        {
+            using var http = new HttpClient();
+            http.Timeout = TimeSpan.FromMinutes(10);
+
+            var response = await http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead);
+            response.EnsureSuccessStatusCode();
+
+            var totalBytes = response.Content.Headers.ContentLength ?? -1;
+            using var contentStream = await response.Content.ReadAsStreamAsync();
+            using var fileStream = new FileStream(filePath, FileMode.Create, FileAccess.Write, FileShare.None);
+
+            var buffer = new byte[81920];
+            long totalRead = 0;
+            int bytesRead;
+
+            while ((bytesRead = await contentStream.ReadAsync(buffer, 0, buffer.Length)) > 0)
+            {
+                await fileStream.WriteAsync(buffer, 0, bytesRead);
+                totalRead += bytesRead;
+
+                if (totalBytes > 0)
+                {
+                    var progress = (int)((totalRead * 100) / totalBytes);
+                    Console.Write($"\r  Downloaded: {totalRead / 1024 / 1024}MB / {totalBytes / 1024 / 1024}MB ({progress}%)");
+                }
+            }
+            Console.WriteLine();
+
+            Console.WriteLine($"  SDK downloaded: {filePath}");
+            return filePath;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  Download failed: {ex.Message}");
+            if (File.Exists(filePath))
+                File.Delete(filePath);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Install/register SDK (runs the downloaded installer silently)
+    /// </summary>
+    public static bool InstallSdk(string installerPath)
+    {
+        if (!File.Exists(installerPath))
+        {
+            Console.WriteLine($"  Installer not found: {installerPath}");
+            return false;
+        }
+
+        Console.WriteLine($"  Installing SDK from: {installerPath}");
+        Console.WriteLine("  (This may require administrator privileges)");
+
+        try
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = installerPath,
+                Arguments = "/quiet /norestart", // Silent install
+                UseShellExecute = true,
+                Verb = "runas" // Run as admin
+            };
+
+            using var process = Process.Start(psi);
+            if (process == null)
+            {
+                Console.WriteLine("  Failed to start installer");
+                return false;
+            }
+
+            process.WaitForExit(TimeSpan.FromMinutes(5));
+
+            if (process.ExitCode == 0)
+            {
+                Console.WriteLine("  SDK installed successfully");
+                return true;
+            }
+            else
+            {
+                Console.WriteLine($"  Installer exited with code: {process.ExitCode}");
+                return false;
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  Installation failed: {ex.Message}");
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Ensure SDK is available for the detected version
+    /// Downloads and installs if necessary
+    /// </summary>
+    public static async Task<bool> EnsureSdkAsync(string accDataPath)
+    {
+        Console.WriteLine("\n[SDK Manager]");
+
+        // Check if SDK is already registered
+        if (IsSdkAvailable())
+        {
+            Console.WriteLine("  SDK already available (SDOEngine.32 registered)");
+            return true;
+        }
+
+        // Detect version from ACCDATA
+        var version = DetectVersion(accDataPath);
+        if (version == null)
+        {
+            Console.WriteLine("  Cannot determine required SDK version");
+            Console.WriteLine("  Please install Sage 50 SDO manually from:");
+            Console.WriteLine("  https://gb-kb.sage.com/portal/app/portlets/results/viewsolution.jsp?solutionid=201224120012523");
+            return false;
+        }
+
+        Console.WriteLine($"  Required SDK version: {version}");
+
+        // Download SDK
+        var is64Bit = Environment.Is64BitOperatingSystem;
+        var installerPath = await DownloadSdkAsync(version, is64Bit);
+        if (installerPath == null)
+            return false;
+
+        // Install SDK
+        if (!InstallSdk(installerPath))
+            return false;
+
+        // Verify installation
+        if (IsSdkAvailable())
+        {
+            Console.WriteLine("  SDK ready for use");
+            return true;
+        }
+
+        Console.WriteLine("  SDK installation completed but COM registration not detected");
+        Console.WriteLine("  You may need to restart the application");
+        return false;
+    }
+
+    /// <summary>
+    /// List available SDK versions
+    /// </summary>
+    public static void ListAvailableVersions()
+    {
+        Console.WriteLine("\nAvailable Sage 50 SDK versions:");
+        foreach (var kvp in SdkDownloads.OrderByDescending(k => k.Key))
+        {
+            var has64 = !string.IsNullOrEmpty(kvp.Value.Url64) ? "64-bit" : "";
+            var has32 = !string.IsNullOrEmpty(kvp.Value.Url32) ? "32-bit" : "";
+            var bits = string.Join(", ", new[] { has64, has32 }.Where(s => !string.IsNullOrEmpty(s)));
+            Console.WriteLine($"  v{kvp.Key} ({bits})");
         }
     }
 }

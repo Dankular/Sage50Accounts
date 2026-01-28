@@ -17,9 +17,9 @@ A console application that connects to Sage 50 Accounts and provides:
 
 ## Requirements
 
-- **Sage 50 Accounts** installed with SDO Engine registered (SDOEngine.32)
 - **.NET 9.0** or later (Windows x64)
 - Access to a Sage 50 company data folder (e.g., `X:\ACCDATA`)
+- **Sage 50 SDO Engine** - auto-downloaded if not installed (see SDK Management below)
 
 ## Usage
 
@@ -59,6 +59,29 @@ SageConnector.exe ... bankrec   # Post bank receipt
 # SDK Discovery
 SageConnector.exe ... discover  # Discover available SDK posting objects
 ```
+
+### SDK Management
+
+The SDK Manager automatically detects the Sage 50 version from ACCDATA and downloads the appropriate SDK.
+
+```bash
+# Check SDK status
+SageConnector.exe sdk status
+
+# List available SDK versions
+SageConnector.exe sdk list
+
+# Detect version from ACCDATA
+SageConnector.exe sdk detect "X:\ACCDATA"
+
+# Download specific SDK version
+SageConnector.exe sdk download 32.0
+
+# Auto-detect and install SDK for ACCDATA
+SageConnector.exe sdk install "X:\ACCDATA"
+```
+
+SDK downloads are sourced from the official Sage KB article and cached locally.
 
 ## Code Examples
 
