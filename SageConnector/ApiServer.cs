@@ -18,7 +18,7 @@ public class ApiServer : IDisposable
 
     public ApiServer(string dataPath, string username, string password, int port = 5000)
     {
-        _prefix = $"http://localhost:{port}/";
+        _prefix = $"http://+:{port}/";
         _listener = new HttpListener();
         _listener.Prefixes.Add(_prefix);
 
