@@ -1,10 +1,8 @@
 # Sage 50 Accounts SDK Tools
 
-C# console applications for interacting with Sage 50 Accounts (UK) via the SDO (Sage Data Objects) COM interface.
+C# console application for interacting with Sage 50 Accounts (UK) via the SDO (Sage Data Objects) COM interface.
 
-## Projects
-
-### SageConnector
+## SageConnector
 
 A console application that connects to Sage 50 Accounts and provides:
 
@@ -16,10 +14,6 @@ A console application that connects to Sage 50 Accounts and provides:
 - **List customers/suppliers** - Browse ledger accounts with balances
 - **List invoices** - View recent invoice records with details
 - **Create invoice documents** - Via InvoicePost/SopPost (order processing system)
-
-### SagePostViewer
-
-A PE file analysis tool using PeNet to examine the Sage 50 SDK DLLs and discover available COM interfaces, types, and methods.
 
 ## Requirements
 
