@@ -153,6 +153,12 @@ class Program
                 Console.WriteLine("\n*** DISCOVERING SDK POSTING OBJECTS ***");
                 sage.DiscoverPostingObjects();
             }
+            // Read audit records to understand transaction structure
+            else if (args.Any(a => a.Equals("audit", StringComparison.OrdinalIgnoreCase)))
+            {
+                Console.WriteLine("\n*** READING AUDIT RECORDS ***");
+                sage.ReadAuditRecords(20);
+            }
             // Test sales invoice posting (direct to ledger via TransactionPost)
             else if (args.Any(a => a.Equals("sinv", StringComparison.OrdinalIgnoreCase)))
             {
@@ -199,17 +205,29 @@ class Program
             {
                 Console.WriteLine("\n*** POSTING PURCHASE INVOICE ***");
 
-                // Use account that exists as both customer and supplier
-                var supplierRef = "IMPHAM"; // Import Helpers gmbh - in both customer and supplier lists
+                // First, create FALCONLO as a supplier if it doesn't exist
+                var supplierRef = "FALCONLO";
+                if (!sage.SupplierExists(supplierRef))
+                {
+                    Console.WriteLine($"  Creating {supplierRef} as supplier (already exists as customer)...");
+                    var sup = new SupplierAccount
+                    {
+                        AccountRef = supplierRef,
+                        Name = "Falcon Logistics",
+                        Address1 = "Test Address",
+                        Postcode = "TE5 T12"
+                    };
+                    sage.CreateSupplierEx(sup);
+                }
 
                 var success = sage.PostPurchaseInvoice(
                     supplierAccount: supplierRef,
                     invoiceRef: $"PI-{DateTime.Now:yyyyMMddHHmmss}",
                     netAmount: 50.00m,
                     taxAmount: 10.00m,
-                    nominalCode: "5000",
+                    nominalCode: "4000",  // Sales Type A (exists in this data)
                     details: "Test purchase invoice from SageConnector",
-                    taxCode: "T1",
+                    taxCode: "T9",  // T9 required for PI per error message
                     postToLedger: true);
 
                 if (success)
@@ -961,6 +979,115 @@ class SageConnection : IDisposable
         catch (Exception ex)
         {
             Console.WriteLine($"  Error listing invoices: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Read audit (transaction) records to understand field structure
+    /// </summary>
+    public void ReadAuditRecords(int maxCount = 20)
+    {
+        if (_workspace == null)
+            throw new InvalidOperationException("Not connected to Sage");
+
+        Console.WriteLine("\n[AUDIT RECORDS (Transactions)]");
+
+        try
+        {
+            // Try different transaction record objects
+            object? auditRecords = null;
+            string? objectUsed = null;
+
+            foreach (var objName in new[] { "AuditTrail", "TransactionHistory", "NominalTranRecord", "BankTranRecord", "SalesDebtorsTran", "PurchaseCreditorsTran" })
+            {
+                try
+                {
+                    auditRecords = InvokeComMethod(_workspace, "CreateObject", objName);
+                    if (auditRecords != null)
+                    {
+                        objectUsed = objName;
+                        Console.WriteLine($"  Found: {objName}");
+                        break;
+                    }
+                }
+                catch { }
+            }
+
+            if (auditRecords == null)
+            {
+                Console.WriteLine("  Could not find transaction records object");
+                Console.WriteLine("  Let's check PurchaseRecord to see supplier transactions...");
+
+                // Use PurchaseRecord to read supplier transactions
+                auditRecords = InvokeComMethod(_workspace, "CreateObject", "PurchaseRecord");
+                objectUsed = "PurchaseRecord";
+            }
+
+            Console.WriteLine($"  Using: {objectUsed}");
+
+            var fields = GetComProperty(auditRecords, "Fields");
+            if (fields != null)
+            {
+                // Discover all field names
+                var count = (int)GetComProperty(fields, "Count")!;
+                Console.WriteLine($"  Total fields: {count}");
+
+                for (int i = 1; i <= Math.Min(count, 30); i++)
+                {
+                    try
+                    {
+                        var field = fields.GetType().InvokeMember("Item", BindingFlags.GetProperty, null, fields, new object[] { i });
+                        var name = GetComProperty(field, "Name");
+                        var value = GetComProperty(field, "Value");
+                        Console.WriteLine($"    [{i}] {name} = {value}");
+                    }
+                    catch { }
+                }
+                if (count > 30)
+                    Console.WriteLine($"    ... and {count - 30} more fields");
+            }
+
+            // Move to first record
+            InvokeComMethod(auditRecords, "MoveFirst");
+
+            Console.WriteLine("\n  Recent transactions:");
+            int recordCount = 0;
+
+            while (recordCount < maxCount)
+            {
+                var eof = GetComProperty(auditRecords, "Eof");
+                if (eof != null && (bool)eof)
+                    break;
+
+                try
+                {
+                    // Key fields to identify transaction type
+                    var typeVal = GetFieldByName(auditRecords, "TYPE");
+                    var acctRef = GetFieldByName(auditRecords, "ACCOUNT_REF");
+                    var date = GetFieldByName(auditRecords, "DATE");
+                    var details = GetFieldByName(auditRecords, "DETAILS");
+                    var net = GetFieldByName(auditRecords, "NET_AMOUNT");
+                    var nominal = GetFieldByName(auditRecords, "NOMINAL_CODE");
+
+                    var dateStr = date is DateTime dt ? dt.ToString("dd/MM/yyyy") : date?.ToString() ?? "";
+                    Console.WriteLine($"    TYPE={typeVal} ACCT={acctRef} DATE={dateStr} NOM={nominal} NET={net:C} DETAILS={details}");
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"    Error reading record: {ex.Message}");
+                }
+
+                InvokeComMethod(auditRecords, "MoveNext");
+                recordCount++;
+            }
+
+            Console.WriteLine($"  (Showed {recordCount} records)");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  Error reading audit records: {ex.Message}");
+            if (ex.InnerException != null)
+                Console.WriteLine($"    Inner: {ex.InnerException.Message}");
         }
     }
 
@@ -2459,7 +2586,11 @@ class SageConnection : IDisposable
 
             // Set TYPE first - this determines which account table to use
             // TYPE=4 is Purchase Invoice (PI) - uses Supplier accounts
+            Console.WriteLine($"  Setting TYPE to 4 (PI)...");
             SetFieldByName(header, "TYPE", 4);
+            // Verify it was set
+            var typeCheck = GetFieldByName(header, "TYPE");
+            Console.WriteLine($"  TYPE after setting: {typeCheck}");
 
             // Now set the account reference (Sage knows to look in Suppliers table)
             SetFieldByName(header, "ACCOUNT_REF", supplierAccount);
@@ -2467,10 +2598,11 @@ class SageConnection : IDisposable
             SetFieldByName(header, "INV_REF", invoiceRef);
             SetFieldByName(header, "DETAILS", string.IsNullOrEmpty(details) ? "Purchase Invoice" : details);
 
-            int tc = taxCode switch { "T0" => 0, "T1" => 1, "T2" => 2, "T5" => 5, "T9" => 9, _ => 1 };
+            // Use T9 tax code (error said "must use T9 tax code")
+            int tc = 9; // T9 = zero rated outside scope
             decimal grossAmount = netAmount + taxAmount;
             SetFieldByName(header, "NET_AMOUNT", netAmount);
-            SetFieldByName(header, "TAX_AMOUNT", taxAmount);
+            SetFieldByName(header, "TAX_AMOUNT", 0m); // No VAT for T9
 
             // Set item (split) for nominal posting
             var items = GetComProperty(txPost, "Items");
@@ -2479,11 +2611,13 @@ class SageConnection : IDisposable
                 var item = InvokeComMethod(items, "Add");
                 if (item != null)
                 {
-                    SetFieldByName(item, "NOMINAL_CODE", nominalCode);
+                    // Try 4001 (Sales Type B) - non-control, non-bank account
+                    SetFieldByName(item, "NOMINAL_CODE", "4001");
                     SetFieldByName(item, "DETAILS", string.IsNullOrEmpty(details) ? "Purchase Invoice" : details);
                     SetFieldByName(item, "NET_AMOUNT", netAmount);
-                    SetFieldByName(item, "TAX_AMOUNT", taxAmount);
-                    SetFieldByName(item, "TAX_CODE", tc);
+                    SetFieldByName(item, "TAX_AMOUNT", 0m);
+                    SetFieldByName(item, "TAX_CODE", 9);
+                    Console.WriteLine($"  Set item: Nominal=4001 (Sales Type B), Net={netAmount:C}");
                 }
             }
 
