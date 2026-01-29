@@ -217,6 +217,158 @@ public class ApiServer : IDisposable
         if (path == "/api/journals/simple" && method == "POST")
             return await PostSimpleJournalAsync(request);
 
+        // Products
+        if (path == "/api/products")
+        {
+            if (method == "GET") return GetProducts(request);
+            if (method == "POST") return await CreateProductAsync(request);
+        }
+
+        var productMatch = Regex.Match(path, @"^/api/products/([^/]+)$");
+        if (productMatch.Success && method == "GET")
+        {
+            var stockCode = Uri.UnescapeDataString(productMatch.Groups[1].Value);
+            return GetProduct(stockCode);
+        }
+
+        // Stock
+        if (path == "/api/stock" && method == "POST")
+            return await PostStockAdjustmentAsync(request);
+
+        var stockMatch = Regex.Match(path, @"^/api/stock/([^/]+)$");
+        if (stockMatch.Success && method == "GET")
+        {
+            var stockCode = Uri.UnescapeDataString(stockMatch.Groups[1].Value);
+            return GetStockLevel(stockCode);
+        }
+
+        // Sales Orders
+        if (path == "/api/salesorders")
+        {
+            if (method == "GET") return GetSalesOrders(request);
+            if (method == "POST") return await CreateSalesOrderAsync(request);
+        }
+
+        var salesOrderMatch = Regex.Match(path, @"^/api/salesorders/([^/]+)$");
+        if (salesOrderMatch.Success)
+        {
+            var orderNumber = Uri.UnescapeDataString(salesOrderMatch.Groups[1].Value);
+            if (method == "GET") return GetSalesOrder(orderNumber);
+            if (method == "PATCH") return await UpdateSalesOrderAsync(orderNumber, request);
+            if (method == "DELETE") return DeleteSalesOrder(orderNumber);
+        }
+
+        var salesOrderCompleteMatch = Regex.Match(path, @"^/api/salesorders/([^/]+)/complete$");
+        if (salesOrderCompleteMatch.Success && method == "POST")
+        {
+            var orderNumber = Uri.UnescapeDataString(salesOrderCompleteMatch.Groups[1].Value);
+            return CompleteSalesOrder(orderNumber);
+        }
+
+        // Purchase Orders
+        if (path == "/api/purchaseorders")
+        {
+            if (method == "GET") return GetPurchaseOrders(request);
+            if (method == "POST") return await CreatePurchaseOrderAsync(request);
+        }
+
+        var purchaseOrderMatch = Regex.Match(path, @"^/api/purchaseorders/([^/]+)$");
+        if (purchaseOrderMatch.Success)
+        {
+            var orderNumber = Uri.UnescapeDataString(purchaseOrderMatch.Groups[1].Value);
+            if (method == "GET") return GetPurchaseOrder(orderNumber);
+            if (method == "PATCH") return await UpdatePurchaseOrderAsync(orderNumber, request);
+            if (method == "DELETE") return DeletePurchaseOrder(orderNumber);
+        }
+
+        // System/Status endpoints
+        if (path == "/api/status" && method == "GET")
+            return GetStatus();
+
+        if (path == "/api/version" && method == "GET")
+            return GetVersion();
+
+        if (path == "/api/setup" && method == "GET")
+            return GetSetup();
+
+        if (path == "/api/financialyear" && method == "GET")
+            return GetFinancialYear();
+
+        // Financial Setup endpoints
+        if (path == "/api/taxcodes" && method == "GET")
+            return GetTaxCodes();
+
+        if (path == "/api/currencies" && method == "GET")
+            return GetCurrencies();
+
+        if (path == "/api/departments" && method == "GET")
+            return GetDepartments();
+
+        if (path == "/api/banks" && method == "GET")
+            return GetBanks();
+
+        if (path == "/api/paymentmethods" && method == "GET")
+            return GetPaymentMethods();
+
+        if (path == "/api/coa" && method == "GET")
+            return GetChartOfAccounts(request);
+
+        // Search/Ledger endpoints
+        if (path == "/api/search/salesledger" && method == "GET")
+            return SearchSalesLedger(request);
+
+        if (path == "/api/search/purchaseledger" && method == "GET")
+            return SearchPurchaseLedger(request);
+
+        if (path == "/api/ageddebtors" && method == "GET")
+            return GetAgedDebtors(request);
+
+        if (path == "/api/agedcreditors" && method == "GET")
+            return GetAgedCreditors(request);
+
+        var customerAddressesMatch = Regex.Match(path, @"^/api/customers/([^/]+)/addresses$");
+        if (customerAddressesMatch.Success && method == "GET")
+        {
+            var accountRef = Uri.UnescapeDataString(customerAddressesMatch.Groups[1].Value);
+            return GetCustomerAddresses(accountRef);
+        }
+
+        // Transaction/Payment endpoints
+        if (path == "/api/transactions" && method == "GET")
+            return GetTransactions(request);
+
+        if (path == "/api/transactions/batch" && method == "POST")
+            return await PostTransactionBatchAsync(request);
+
+        if (path == "/api/payments/allocate" && method == "POST")
+            return await AllocatePaymentAsync(request);
+
+        if (path == "/api/sales/receipt" && method == "POST")
+            return await PostSalesReceiptAsync(request);
+
+        if (path == "/api/purchases/payment" && method == "POST")
+            return await PostPurchasePaymentAsync(request);
+
+        // Project endpoints
+        if (path == "/api/projects")
+        {
+            if (method == "GET") return GetProjects(request);
+            if (method == "POST") return await CreateProjectAsync(request);
+        }
+
+        var projectMatch = Regex.Match(path, @"^/api/projects/([^/]+)$");
+        if (projectMatch.Success && method == "GET")
+        {
+            var projectRef = Uri.UnescapeDataString(projectMatch.Groups[1].Value);
+            return GetProject(projectRef);
+        }
+
+        if (path == "/api/projectcostcodes" && method == "GET")
+            return GetProjectCostCodes(request);
+
+        if (path == "/api/search/projects" && method == "GET")
+            return SearchProjects(request);
+
         // Not found
         return (404, ApiResponse.Error($"Endpoint not found: {method} {path}"));
     }
@@ -705,6 +857,636 @@ public class ApiServer : IDisposable
             return (500, ApiResponse.Error("Failed to post journal"));
 
         return (200, ApiResponse.Ok(new TransactionResponse(true, reference, "Journal posted")));
+    }
+
+    // =========================================================================
+    // Product Handlers
+    // =========================================================================
+
+    private (int, object) GetProducts(HttpListenerRequest request)
+    {
+        var search = request.QueryString["search"] ?? "";
+        var limitStr = request.QueryString["limit"] ?? "50";
+        int.TryParse(limitStr, out var limit);
+        if (limit <= 0) limit = 50;
+
+        var products = _sage.GetProducts(search, limit);
+        return (200, ApiResponse.Ok(products));
+    }
+
+    private (int, object) GetProduct(string stockCode)
+    {
+        var product = _sage.GetProduct(stockCode);
+        if (product == null)
+            return (404, ApiResponse.Error($"Product not found: {stockCode}"));
+
+        return (200, ApiResponse.Ok(product));
+    }
+
+    private async Task<(int, object)> CreateProductAsync(HttpListenerRequest request)
+    {
+        var body = await ReadBodyAsync<CreateProductRequest>(request);
+        if (body == null)
+            return (400, ApiResponse.Error("Invalid request body"));
+
+        if (string.IsNullOrWhiteSpace(body.StockCode))
+            return (400, ApiResponse.Error("stockCode is required"));
+
+        var result = _sage.CreateProduct(body);
+        if (result == null)
+            return (500, ApiResponse.Error("Failed to create product"));
+
+        return (201, ApiResponse.Ok(result));
+    }
+
+    // =========================================================================
+    // Stock Handlers
+    // =========================================================================
+
+    private (int, object) GetStockLevel(string stockCode)
+    {
+        var stock = _sage.GetStockLevel(stockCode);
+        if (stock == null)
+            return (404, ApiResponse.Error($"Stock not found: {stockCode}"));
+
+        return (200, ApiResponse.Ok(stock));
+    }
+
+    private async Task<(int, object)> PostStockAdjustmentAsync(HttpListenerRequest request)
+    {
+        var body = await ReadBodyAsync<StockAdjustmentRequest>(request);
+        if (body == null)
+            return (400, ApiResponse.Error("Invalid request body"));
+
+        if (string.IsNullOrWhiteSpace(body.StockCode))
+            return (400, ApiResponse.Error("stockCode is required"));
+
+        var reference = body.Reference ?? $"ADJ-{DateTime.Now:yyyyMMddHHmmss}";
+
+        var success = _sage.PostStockAdjustment(
+            body.StockCode,
+            body.Quantity,
+            body.AdjustmentType,
+            reference,
+            body.Details ?? "Stock adjustment via API",
+            body.CostPrice
+        );
+
+        if (!success)
+            return (500, ApiResponse.Error("Failed to post stock adjustment"));
+
+        return (200, ApiResponse.Ok(new TransactionResponse(true, reference, "Stock adjustment posted")));
+    }
+
+    // =========================================================================
+    // Sales Order Handlers
+    // =========================================================================
+
+    private (int, object) GetSalesOrders(HttpListenerRequest request)
+    {
+        var search = request.QueryString["search"] ?? "";
+        var limitStr = request.QueryString["limit"] ?? "50";
+        int.TryParse(limitStr, out var limit);
+        if (limit <= 0) limit = 50;
+
+        var orders = _sage.GetSalesOrders(search, limit);
+        return (200, ApiResponse.Ok(orders));
+    }
+
+    private (int, object) GetSalesOrder(string orderNumber)
+    {
+        var order = _sage.GetSalesOrder(orderNumber);
+        if (order == null)
+            return (404, ApiResponse.Error($"Sales order not found: {orderNumber}"));
+
+        return (200, ApiResponse.Ok(order));
+    }
+
+    private async Task<(int, object)> CreateSalesOrderAsync(HttpListenerRequest request)
+    {
+        var body = await ReadBodyAsync<CreateSalesOrderRequest>(request);
+        if (body == null)
+            return (400, ApiResponse.Error("Invalid request body"));
+
+        if (string.IsNullOrWhiteSpace(body.CustomerAccountRef))
+            return (400, ApiResponse.Error("customerAccountRef is required"));
+
+        // Check customer exists or auto-create
+        if (!_sage.CustomerExists(body.CustomerAccountRef))
+        {
+            if (body.AutoCreateCustomer)
+            {
+                var cust = new CustomerAccount
+                {
+                    AccountRef = body.CustomerAccountRef.ToUpperInvariant(),
+                    Name = $"Auto-created {body.CustomerAccountRef}",
+                    Address1 = "Auto-created via API"
+                };
+                if (!_sage.CreateCustomerEx(cust))
+                    return (400, ApiResponse.Error($"Failed to auto-create customer: {body.CustomerAccountRef}"));
+            }
+            else
+            {
+                return (404, ApiResponse.Error($"Customer not found: {body.CustomerAccountRef}. Set autoCreateCustomer=true to create."));
+            }
+        }
+
+        var result = _sage.CreateSalesOrder(body);
+        if (result == null)
+            return (500, ApiResponse.Error("Failed to create sales order"));
+
+        return (201, ApiResponse.Ok(result));
+    }
+
+    private async Task<(int, object)> UpdateSalesOrderAsync(string orderNumber, HttpListenerRequest request)
+    {
+        var body = await ReadBodyAsync<UpdateSalesOrderRequest>(request);
+        if (body == null)
+            return (400, ApiResponse.Error("Invalid request body"));
+
+        var success = _sage.UpdateSalesOrder(orderNumber, body);
+        if (!success)
+            return (500, ApiResponse.Error($"Failed to update sales order: {orderNumber}"));
+
+        return (200, ApiResponse.Ok(new TransactionResponse(true, orderNumber, "Sales order updated")));
+    }
+
+    private (int, object) DeleteSalesOrder(string orderNumber)
+    {
+        var success = _sage.DeleteSalesOrder(orderNumber);
+        if (!success)
+            return (500, ApiResponse.Error($"Failed to delete sales order: {orderNumber}"));
+
+        return (200, ApiResponse.Ok(new TransactionResponse(true, orderNumber, "Sales order deleted")));
+    }
+
+    private (int, object) CompleteSalesOrder(string orderNumber)
+    {
+        var success = _sage.CompleteSalesOrder(orderNumber);
+        if (!success)
+            return (500, ApiResponse.Error($"Failed to complete sales order: {orderNumber}"));
+
+        return (200, ApiResponse.Ok(new TransactionResponse(true, orderNumber, "Sales order completed")));
+    }
+
+    // =========================================================================
+    // Purchase Order Handlers
+    // =========================================================================
+
+    private (int, object) GetPurchaseOrders(HttpListenerRequest request)
+    {
+        var search = request.QueryString["search"] ?? "";
+        var limitStr = request.QueryString["limit"] ?? "50";
+        int.TryParse(limitStr, out var limit);
+        if (limit <= 0) limit = 50;
+
+        var orders = _sage.GetPurchaseOrders(search, limit);
+        return (200, ApiResponse.Ok(orders));
+    }
+
+    private (int, object) GetPurchaseOrder(string orderNumber)
+    {
+        var order = _sage.GetPurchaseOrder(orderNumber);
+        if (order == null)
+            return (404, ApiResponse.Error($"Purchase order not found: {orderNumber}"));
+
+        return (200, ApiResponse.Ok(order));
+    }
+
+    private async Task<(int, object)> CreatePurchaseOrderAsync(HttpListenerRequest request)
+    {
+        var body = await ReadBodyAsync<CreatePurchaseOrderRequest>(request);
+        if (body == null)
+            return (400, ApiResponse.Error("Invalid request body"));
+
+        if (string.IsNullOrWhiteSpace(body.SupplierAccount))
+            return (400, ApiResponse.Error("supplierAccount is required"));
+
+        // Check supplier exists or auto-create
+        if (!_sage.SupplierExists(body.SupplierAccount))
+        {
+            if (body.AutoCreateSupplier)
+            {
+                var sup = new SupplierAccount
+                {
+                    AccountRef = body.SupplierAccount.ToUpperInvariant(),
+                    Name = $"Auto-created {body.SupplierAccount}",
+                    Address1 = "Auto-created via API"
+                };
+                if (!_sage.CreateSupplierEx(sup))
+                    return (400, ApiResponse.Error($"Failed to auto-create supplier: {body.SupplierAccount}"));
+            }
+            else
+            {
+                return (404, ApiResponse.Error($"Supplier not found: {body.SupplierAccount}. Set autoCreateSupplier=true to create."));
+            }
+        }
+
+        var result = _sage.CreatePurchaseOrder(body);
+        if (result == null)
+            return (500, ApiResponse.Error("Failed to create purchase order"));
+
+        return (201, ApiResponse.Ok(result));
+    }
+
+    private async Task<(int, object)> UpdatePurchaseOrderAsync(string orderNumber, HttpListenerRequest request)
+    {
+        var body = await ReadBodyAsync<UpdatePurchaseOrderRequest>(request);
+        if (body == null)
+            return (400, ApiResponse.Error("Invalid request body"));
+
+        var success = _sage.UpdatePurchaseOrder(orderNumber, body);
+        if (!success)
+            return (500, ApiResponse.Error($"Failed to update purchase order: {orderNumber}"));
+
+        return (200, ApiResponse.Ok(new TransactionResponse(true, orderNumber, "Purchase order updated")));
+    }
+
+    private (int, object) DeletePurchaseOrder(string orderNumber)
+    {
+        var success = _sage.DeletePurchaseOrder(orderNumber);
+        if (!success)
+            return (500, ApiResponse.Error($"Failed to delete purchase order: {orderNumber}"));
+
+        return (200, ApiResponse.Ok(new TransactionResponse(true, orderNumber, "Purchase order deleted")));
+    }
+
+    // =========================================================================
+    // System/Status Handlers
+    // =========================================================================
+
+    private (int, object) GetStatus()
+    {
+        var status = new StatusResponse(
+            Status: "ok",
+            Connected: _sage.IsConnected,
+            Timestamp: DateTime.UtcNow,
+            Version: GetType().Assembly.GetName().Version?.ToString() ?? "1.0.0"
+        );
+        return (200, ApiResponse.Ok(status));
+    }
+
+    private (int, object) GetVersion()
+    {
+        var version = new VersionResponse(
+            ApiVersion: GetType().Assembly.GetName().Version?.ToString() ?? "1.0.0",
+            SageVersion: _sage.GetSageVersion(),
+            BuildDate: File.GetLastWriteTime(GetType().Assembly.Location).ToString("yyyy-MM-dd")
+        );
+        return (200, ApiResponse.Ok(version));
+    }
+
+    private (int, object) GetSetup()
+    {
+        var setup = _sage.GetSetup();
+        if (setup == null)
+            return (500, ApiResponse.Error("Failed to get setup information"));
+
+        return (200, ApiResponse.Ok(setup));
+    }
+
+    private (int, object) GetFinancialYear()
+    {
+        var financialYear = _sage.GetFinancialYear();
+        if (financialYear == null)
+            return (500, ApiResponse.Error("Failed to get financial year information"));
+
+        return (200, ApiResponse.Ok(financialYear));
+    }
+
+    // =========================================================================
+    // Financial Setup Handlers
+    // =========================================================================
+
+    private (int, object) GetTaxCodes()
+    {
+        var taxCodes = _sage.GetTaxCodes();
+        return (200, ApiResponse.Ok(taxCodes));
+    }
+
+    private (int, object) GetCurrencies()
+    {
+        var currencies = _sage.GetCurrencies();
+        return (200, ApiResponse.Ok(currencies));
+    }
+
+    private (int, object) GetDepartments()
+    {
+        var departments = _sage.GetDepartments();
+        return (200, ApiResponse.Ok(departments));
+    }
+
+    private (int, object) GetBanks()
+    {
+        var banks = _sage.GetBanks();
+        return (200, ApiResponse.Ok(banks));
+    }
+
+    private (int, object) GetPaymentMethods()
+    {
+        var methods = _sage.GetPaymentMethods();
+        return (200, ApiResponse.Ok(methods));
+    }
+
+    private (int, object) GetChartOfAccounts(HttpListenerRequest request)
+    {
+        var typeFilter = request.QueryString["type"] ?? "";
+        var limitStr = request.QueryString["limit"] ?? "500";
+        int.TryParse(limitStr, out var limit);
+        if (limit <= 0) limit = 500;
+
+        var accounts = _sage.GetChartOfAccounts(typeFilter, limit);
+        return (200, ApiResponse.Ok(accounts));
+    }
+
+    // =========================================================================
+    // Search/Ledger Handlers
+    // =========================================================================
+
+    private (int, object) SearchSalesLedger(HttpListenerRequest request)
+    {
+        var accountRef = request.QueryString["account"] ?? "";
+        var fromDate = request.QueryString["from"];
+        var toDate = request.QueryString["to"];
+        var limitStr = request.QueryString["limit"] ?? "100";
+        int.TryParse(limitStr, out var limit);
+        if (limit <= 0) limit = 100;
+
+        DateTime? from = null, to = null;
+        if (!string.IsNullOrEmpty(fromDate) && DateTime.TryParse(fromDate, out DateTime fromParsed))
+            from = fromParsed;
+        if (!string.IsNullOrEmpty(toDate) && DateTime.TryParse(toDate, out DateTime toParsed))
+            to = toParsed;
+
+        var transactions = _sage.SearchSalesLedger(accountRef, from, to, limit);
+        return (200, ApiResponse.Ok(transactions));
+    }
+
+    private (int, object) SearchPurchaseLedger(HttpListenerRequest request)
+    {
+        var accountRef = request.QueryString["account"] ?? "";
+        var fromDate = request.QueryString["from"];
+        var toDate = request.QueryString["to"];
+        var limitStr = request.QueryString["limit"] ?? "100";
+        int.TryParse(limitStr, out var limit);
+        if (limit <= 0) limit = 100;
+
+        DateTime? from = null, to = null;
+        if (!string.IsNullOrEmpty(fromDate) && DateTime.TryParse(fromDate, out DateTime fromParsed))
+            from = fromParsed;
+        if (!string.IsNullOrEmpty(toDate) && DateTime.TryParse(toDate, out DateTime toParsed))
+            to = toParsed;
+
+        var transactions = _sage.SearchPurchaseLedger(accountRef, from, to, limit);
+        return (200, ApiResponse.Ok(transactions));
+    }
+
+    private (int, object) GetAgedDebtors(HttpListenerRequest request)
+    {
+        var limitStr = request.QueryString["limit"] ?? "100";
+        int.TryParse(limitStr, out var limit);
+        if (limit <= 0) limit = 100;
+
+        var debtors = _sage.GetAgedDebtors(limit);
+        return (200, ApiResponse.Ok(debtors));
+    }
+
+    private (int, object) GetAgedCreditors(HttpListenerRequest request)
+    {
+        var limitStr = request.QueryString["limit"] ?? "100";
+        int.TryParse(limitStr, out var limit);
+        if (limit <= 0) limit = 100;
+
+        var creditors = _sage.GetAgedCreditors(limit);
+        return (200, ApiResponse.Ok(creditors));
+    }
+
+    private (int, object) GetCustomerAddresses(string accountRef)
+    {
+        var addresses = _sage.GetCustomerAddresses(accountRef);
+        if (addresses == null || addresses.Count == 0)
+            return (404, ApiResponse.Error($"No addresses found for customer: {accountRef}"));
+
+        return (200, ApiResponse.Ok(addresses));
+    }
+
+    // =========================================================================
+    // Transaction/Payment Handlers
+    // =========================================================================
+
+    private (int, object) GetTransactions(HttpListenerRequest request)
+    {
+        var type = request.QueryString["type"] ?? "";
+        var fromDate = request.QueryString["from"];
+        var toDate = request.QueryString["to"];
+        var limitStr = request.QueryString["limit"] ?? "100";
+        int.TryParse(limitStr, out var limit);
+        if (limit <= 0) limit = 100;
+
+        DateTime? from = null, to = null;
+        if (!string.IsNullOrEmpty(fromDate) && DateTime.TryParse(fromDate, out DateTime fromParsed))
+            from = fromParsed;
+        if (!string.IsNullOrEmpty(toDate) && DateTime.TryParse(toDate, out DateTime toParsed))
+            to = toParsed;
+
+        var transactions = _sage.GetTransactions(type, from, to, limit);
+        return (200, ApiResponse.Ok(transactions));
+    }
+
+    private async Task<(int, object)> PostTransactionBatchAsync(HttpListenerRequest request)
+    {
+        var body = await ReadBodyAsync<PostTransactionBatchRequest>(request);
+        if (body == null || body.Transactions == null || body.Transactions.Count == 0)
+            return (400, ApiResponse.Error("Invalid request body or empty transactions list"));
+
+        var results = new List<TransactionResponse>();
+        int successCount = 0, failCount = 0;
+
+        foreach (var txn in body.Transactions)
+        {
+            bool success = false;
+            string message = "";
+
+            try
+            {
+                switch (txn.Type?.ToUpperInvariant())
+                {
+                    case "SI": // Sales Invoice
+                        success = _sage.PostTransactionSI(txn.AccountRef, txn.Reference ?? $"SI-{DateTime.Now.Ticks}",
+                            txn.NetAmount, txn.TaxAmount, txn.NominalCode ?? "4000", txn.Details ?? "", txn.TaxCode ?? "T1", null, true);
+                        message = success ? "Sales invoice posted" : "Failed to post sales invoice";
+                        break;
+
+                    case "PI": // Purchase Invoice
+                        success = _sage.PostTransactionPI(txn.AccountRef, txn.Reference ?? $"PI-{DateTime.Now.Ticks}",
+                            txn.NetAmount, txn.TaxAmount, txn.NominalCode ?? "5000", txn.Details ?? "", txn.TaxCode ?? "T1");
+                        message = success ? "Purchase invoice posted" : "Failed to post purchase invoice";
+                        break;
+
+                    case "BP": // Bank Payment
+                        success = _sage.PostBankPayment(txn.BankNominal ?? "1200", txn.NominalCode ?? "7500",
+                            txn.NetAmount, txn.Reference ?? $"BP-{DateTime.Now.Ticks}", txn.Details ?? "", txn.TaxCode ?? "T0");
+                        message = success ? "Bank payment posted" : "Failed to post bank payment";
+                        break;
+
+                    case "BR": // Bank Receipt
+                        success = _sage.PostBankReceipt(txn.BankNominal ?? "1200", txn.NominalCode ?? "4000",
+                            txn.NetAmount, txn.Reference ?? $"BR-{DateTime.Now.Ticks}", txn.Details ?? "", txn.TaxCode ?? "T1");
+                        message = success ? "Bank receipt posted" : "Failed to post bank receipt";
+                        break;
+
+                    default:
+                        message = $"Unknown transaction type: {txn.Type}";
+                        break;
+                }
+            }
+            catch (Exception ex)
+            {
+                message = ex.Message;
+            }
+
+            if (success) successCount++;
+            else failCount++;
+
+            results.Add(new TransactionResponse(success, txn.Reference, message));
+        }
+
+        return (200, ApiResponse.Ok(new BatchTransactionResponse(successCount, failCount, results)));
+    }
+
+    private async Task<(int, object)> AllocatePaymentAsync(HttpListenerRequest request)
+    {
+        var body = await ReadBodyAsync<AllocatePaymentRequest>(request);
+        if (body == null)
+            return (400, ApiResponse.Error("Invalid request body"));
+
+        if (string.IsNullOrWhiteSpace(body.PaymentReference) || string.IsNullOrWhiteSpace(body.InvoiceReference))
+            return (400, ApiResponse.Error("paymentReference and invoiceReference are required"));
+
+        var success = _sage.AllocatePayment(body.AccountRef, body.PaymentReference, body.InvoiceReference, body.Amount);
+        if (!success)
+            return (500, ApiResponse.Error("Failed to allocate payment"));
+
+        return (200, ApiResponse.Ok(new TransactionResponse(true, body.PaymentReference, "Payment allocated")));
+    }
+
+    private async Task<(int, object)> PostSalesReceiptAsync(HttpListenerRequest request)
+    {
+        var body = await ReadBodyAsync<PostSalesReceiptRequest>(request);
+        if (body == null)
+            return (400, ApiResponse.Error("Invalid request body"));
+
+        if (string.IsNullOrWhiteSpace(body.CustomerAccount))
+            return (400, ApiResponse.Error("customerAccount is required"));
+
+        if (!_sage.CustomerExists(body.CustomerAccount))
+            return (404, ApiResponse.Error($"Customer not found: {body.CustomerAccount}"));
+
+        var receiptRef = body.ReceiptRef ?? $"SR-{DateTime.Now:yyyyMMddHHmmss}";
+
+        var success = _sage.PostSalesReceipt(
+            customerAccount: body.CustomerAccount,
+            reference: receiptRef,
+            amount: body.Amount,
+            bankNominal: body.BankNominal,
+            details: body.Details ?? "Receipt via API"
+        );
+
+        if (!success)
+            return (500, ApiResponse.Error("Failed to post sales receipt"));
+
+        return (200, ApiResponse.Ok(new TransactionResponse(true, receiptRef, "Sales receipt posted")));
+    }
+
+    private async Task<(int, object)> PostPurchasePaymentAsync(HttpListenerRequest request)
+    {
+        var body = await ReadBodyAsync<PostPurchasePaymentRequest>(request);
+        if (body == null)
+            return (400, ApiResponse.Error("Invalid request body"));
+
+        if (string.IsNullOrWhiteSpace(body.SupplierAccount))
+            return (400, ApiResponse.Error("supplierAccount is required"));
+
+        if (!_sage.SupplierExists(body.SupplierAccount))
+            return (404, ApiResponse.Error($"Supplier not found: {body.SupplierAccount}"));
+
+        var paymentRef = body.PaymentRef ?? $"PP-{DateTime.Now:yyyyMMddHHmmss}";
+
+        var success = _sage.PostPurchasePayment(
+            supplierAccount: body.SupplierAccount,
+            reference: paymentRef,
+            amount: body.Amount,
+            bankNominal: body.BankNominal,
+            details: body.Details ?? "Payment via API"
+        );
+
+        if (!success)
+            return (500, ApiResponse.Error("Failed to post purchase payment"));
+
+        return (200, ApiResponse.Ok(new TransactionResponse(true, paymentRef, "Purchase payment posted")));
+    }
+
+    // =========================================================================
+    // Project Handlers
+    // =========================================================================
+
+    private (int, object) GetProjects(HttpListenerRequest request)
+    {
+        var search = request.QueryString["search"] ?? "";
+        var limitStr = request.QueryString["limit"] ?? "50";
+        int.TryParse(limitStr, out var limit);
+        if (limit <= 0) limit = 50;
+
+        var projects = _sage.GetProjects(search, limit);
+        return (200, ApiResponse.Ok(projects));
+    }
+
+    private (int, object) GetProject(string projectRef)
+    {
+        var project = _sage.GetProject(projectRef);
+        if (project == null)
+            return (404, ApiResponse.Error($"Project not found: {projectRef}"));
+
+        return (200, ApiResponse.Ok(project));
+    }
+
+    private async Task<(int, object)> CreateProjectAsync(HttpListenerRequest request)
+    {
+        var body = await ReadBodyAsync<CreateProjectRequest>(request);
+        if (body == null)
+            return (400, ApiResponse.Error("Invalid request body"));
+
+        if (string.IsNullOrWhiteSpace(body.ProjectRef))
+            return (400, ApiResponse.Error("projectRef is required"));
+
+        var result = _sage.CreateProject(body);
+        if (result == null)
+            return (500, ApiResponse.Error("Failed to create project"));
+
+        return (201, ApiResponse.Ok(result));
+    }
+
+    private (int, object) GetProjectCostCodes(HttpListenerRequest request)
+    {
+        var projectRef = request.QueryString["project"] ?? "";
+        var limitStr = request.QueryString["limit"] ?? "100";
+        int.TryParse(limitStr, out var limit);
+        if (limit <= 0) limit = 100;
+
+        var costCodes = _sage.GetProjectCostCodes(projectRef, limit);
+        return (200, ApiResponse.Ok(costCodes));
+    }
+
+    private (int, object) SearchProjects(HttpListenerRequest request)
+    {
+        var search = request.QueryString["q"] ?? request.QueryString["search"] ?? "";
+        var status = request.QueryString["status"] ?? "";
+        var limitStr = request.QueryString["limit"] ?? "50";
+        int.TryParse(limitStr, out var limit);
+        if (limit <= 0) limit = 50;
+
+        var projects = _sage.SearchProjects(search, status, limit);
+        return (200, ApiResponse.Ok(projects));
     }
 
     // =========================================================================

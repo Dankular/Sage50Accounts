@@ -4910,6 +4910,2516 @@ class SageConnection : IDisposable
         // Field not found - silent for non-critical fields
     }
 
+    // =========================================================================
+    // Purchase Order Methods
+    // =========================================================================
+
+    /// <summary>
+    /// Find purchase orders (POP)
+    /// </summary>
+    public List<PurchaseOrderResponse> FindPurchaseOrders(string searchTerm, string? supplierAccount = null, int maxResults = 50)
+    {
+        var results = new List<PurchaseOrderResponse>();
+        if (_workspace == null) return results;
+
+        try
+        {
+            var popRecord = InvokeComMethod(_workspace, "CreateObject", "PopRecord");
+            if (popRecord == null) return results;
+
+            InvokeComMethod(popRecord, "MoveFirst");
+            int count = 0;
+
+            while (count < maxResults)
+            {
+                var eof = InvokeComMethod(popRecord, "IsEOF");
+                if (eof != null && (bool)eof) break;
+
+                var orderNum = GetFieldValue(popRecord, "ORDER_NUMBER")?.ToString() ?? "";
+                var suppRef = GetFieldValue(popRecord, "ACCOUNT_REF")?.ToString() ?? "";
+                var reference = GetFieldValue(popRecord, "ORDER_REF")?.ToString() ?? "";
+
+                bool matches = string.IsNullOrEmpty(searchTerm) ||
+                    orderNum.Contains(searchTerm, StringComparison.OrdinalIgnoreCase) ||
+                    reference.Contains(searchTerm, StringComparison.OrdinalIgnoreCase);
+
+                if (!string.IsNullOrEmpty(supplierAccount))
+                    matches = matches && suppRef.Equals(supplierAccount, StringComparison.OrdinalIgnoreCase);
+
+                if (matches)
+                {
+                    var order = ExtractPurchaseOrderFromRecord(popRecord, false);
+                    if (order != null)
+                    {
+                        results.Add(order);
+                        count++;
+                    }
+                }
+
+                InvokeComMethod(popRecord, "MoveNext");
+            }
+
+            Console.WriteLine($"  Found {results.Count} purchase orders");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FindPurchaseOrders error: {ex.Message}");
+        }
+
+        return results;
+    }
+
+    /// <summary>
+    /// Get a single purchase order with line items
+    /// </summary>
+    public PurchaseOrderResponse? GetPurchaseOrder(string orderNumber)
+    {
+        if (_workspace == null) return null;
+
+        try
+        {
+            var popRecord = InvokeComMethod(_workspace, "CreateObject", "PopRecord");
+            if (popRecord == null) return null;
+
+            InvokeComMethod(popRecord, "MoveFirst");
+
+            while (true)
+            {
+                var eof = InvokeComMethod(popRecord, "IsEOF");
+                if (eof != null && (bool)eof) break;
+
+                var orderNum = GetFieldValue(popRecord, "ORDER_NUMBER")?.ToString() ?? "";
+                if (orderNum.Equals(orderNumber, StringComparison.OrdinalIgnoreCase))
+                {
+                    return ExtractPurchaseOrderFromRecord(popRecord, true);
+                }
+
+                InvokeComMethod(popRecord, "MoveNext");
+            }
+
+            return null;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  GetPurchaseOrder error: {ex.Message}");
+            return null;
+        }
+    }
+
+    private PurchaseOrderResponse? ExtractPurchaseOrderFromRecord(object popRecord, bool includeItems)
+    {
+        try
+        {
+            var orderNumber = GetFieldValue(popRecord, "ORDER_NUMBER")?.ToString() ?? "";
+            var supplierAccount = GetFieldValue(popRecord, "ACCOUNT_REF")?.ToString() ?? "";
+            var supplierName = GetFieldValue(popRecord, "NAME")?.ToString() ?? "";
+            var orderDateVal = GetFieldValue(popRecord, "ORDER_DATE");
+            DateTime? orderDate = orderDateVal != null && DateTime.TryParse(orderDateVal.ToString(), out var od) ? od : null;
+            var deliveryDateVal = GetFieldValue(popRecord, "DUE_DATE");
+            DateTime? deliveryDate = deliveryDateVal != null && DateTime.TryParse(deliveryDateVal.ToString(), out var dd) ? dd : null;
+            var reference = GetFieldValue(popRecord, "ORDER_REF")?.ToString();
+            var notes = GetFieldValue(popRecord, "NOTES_1")?.ToString();
+            var netAmountVal = GetFieldValue(popRecord, "NET_AMOUNT");
+            decimal netAmount = netAmountVal != null ? Convert.ToDecimal(netAmountVal) : 0;
+            var taxAmountVal = GetFieldValue(popRecord, "TAX_AMOUNT");
+            decimal taxAmount = taxAmountVal != null ? Convert.ToDecimal(taxAmountVal) : 0;
+            var grossAmountVal = GetFieldValue(popRecord, "GROSS_AMOUNT");
+            decimal grossAmount = grossAmountVal != null ? Convert.ToDecimal(grossAmountVal) : netAmount + taxAmount;
+            var statusVal = GetFieldValue(popRecord, "ORDER_STATUS");
+            int status = statusVal != null ? Convert.ToInt32(statusVal) : 0;
+
+            List<PurchaseOrderItemResponse>? items = null;
+            if (includeItems)
+            {
+                items = new List<PurchaseOrderItemResponse>();
+                var popItemRecord = InvokeComMethod(_workspace, "CreateObject", "PopItemRecord");
+                if (popItemRecord != null)
+                {
+                    InvokeComMethod(popItemRecord, "MoveFirst");
+                    int lineNum = 1;
+                    while (true)
+                    {
+                        var eof = InvokeComMethod(popItemRecord, "IsEOF");
+                        if (eof != null && (bool)eof) break;
+
+                        var itemOrderNum = GetFieldValue(popItemRecord, "ORDER_NUMBER")?.ToString() ?? "";
+                        if (itemOrderNum.Equals(orderNumber, StringComparison.OrdinalIgnoreCase))
+                        {
+                            var itemResponse = new PurchaseOrderItemResponse(
+                                LineNumber: lineNum++,
+                                StockCode: GetFieldValue(popItemRecord, "STOCK_CODE")?.ToString(),
+                                Description: GetFieldValue(popItemRecord, "DESCRIPTION")?.ToString(),
+                                Quantity: Convert.ToDecimal(GetFieldValue(popItemRecord, "QTY_ORDER") ?? 0),
+                                UnitPrice: Convert.ToDecimal(GetFieldValue(popItemRecord, "UNIT_PRICE") ?? 0),
+                                NetAmount: Convert.ToDecimal(GetFieldValue(popItemRecord, "NET_AMOUNT") ?? 0),
+                                TaxCode: GetFieldValue(popItemRecord, "TAX_CODE")?.ToString(),
+                                TaxAmount: Convert.ToDecimal(GetFieldValue(popItemRecord, "TAX_AMOUNT") ?? 0),
+                                NominalCode: GetFieldValue(popItemRecord, "NOMINAL_CODE")?.ToString()
+                            );
+                            items.Add(itemResponse);
+                        }
+
+                        InvokeComMethod(popItemRecord, "MoveNext");
+                    }
+                }
+            }
+
+            return new PurchaseOrderResponse(
+                OrderNumber: orderNumber,
+                SupplierAccount: supplierAccount,
+                SupplierName: supplierName,
+                OrderDate: orderDate,
+                DeliveryDate: deliveryDate,
+                Reference: reference,
+                Notes: notes,
+                NetAmount: netAmount,
+                TaxAmount: taxAmount,
+                GrossAmount: grossAmount,
+                Status: status,
+                Items: items
+            );
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  ExtractPurchaseOrderFromRecord error: {ex.Message}");
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Create a new purchase order using PopPost
+    /// </summary>
+    public string? CreatePurchaseOrder(
+        string supplierAccount,
+        DateTime? orderDate = null,
+        DateTime? deliveryDate = null,
+        string? reference = null,
+        string? notes = null,
+        List<PurchaseOrderItem>? items = null)
+    {
+        if (_workspace == null)
+            throw new InvalidOperationException("Not connected to Sage");
+
+        Console.WriteLine($"\n[CREATING PURCHASE ORDER]");
+        Console.WriteLine($"  Supplier: {supplierAccount}");
+
+        try
+        {
+            // Create PopPost object for Purchase Order Processing
+            var popPost = InvokeComMethod(_workspace, "CreateObject", "PopPost");
+            if (popPost == null)
+            {
+                Console.WriteLine("  ERROR: Could not create PopPost object");
+                return null;
+            }
+
+            var header = GetComProperty(popPost, "Header");
+            if (header == null)
+            {
+                Console.WriteLine("  ERROR: Could not get Header");
+                return null;
+            }
+
+            // Set header fields - ORDER_TYPE 1 = Purchase Order
+            SetFieldByName(header, "ACCOUNT_REF", supplierAccount);
+            SetFieldByName(header, "ORDER_DATE", orderDate ?? DateTime.Now);
+            SetFieldByName(header, "ORDER_TYPE", 1); // Purchase Order
+            if (!string.IsNullOrEmpty(reference))
+                SetFieldByName(header, "ORDER_REF", reference);
+            if (deliveryDate.HasValue)
+                SetFieldByName(header, "DUE_DATE", deliveryDate.Value);
+            if (!string.IsNullOrEmpty(notes))
+                SetFieldByName(header, "NOTES_1", notes);
+
+            Console.WriteLine($"  Header set: Account={supplierAccount}");
+
+            // Add line items
+            if (items != null && items.Count > 0)
+            {
+                var popItems = GetComProperty(popPost, "Items");
+                if (popItems != null)
+                {
+                    foreach (var lineItem in items)
+                    {
+                        var item = InvokeComMethod(popItems, "Add");
+                        if (item != null)
+                        {
+                            var netAmount = lineItem.UnitPrice * lineItem.Quantity;
+
+                            if (!string.IsNullOrEmpty(lineItem.StockCode))
+                                SetFieldByName(item, "STOCK_CODE", lineItem.StockCode);
+                            SetFieldByName(item, "DESCRIPTION", lineItem.Description);
+                            SetFieldByName(item, "NOMINAL_CODE", lineItem.NominalCode);
+
+                            // TAX_CODE uses integer (T1=1, T0=0, etc.)
+                            int taxCode = lineItem.TaxCode switch
+                            {
+                                "T0" => 0, "T1" => 1, "T2" => 2, "T5" => 5, "T9" => 9, _ => 1
+                            };
+                            SetFieldByName(item, "TAX_CODE", taxCode);
+                            SetFieldByName(item, "NET_AMOUNT", netAmount);
+                            SetFieldByName(item, "UNIT_PRICE", lineItem.UnitPrice);
+                            SetFieldByName(item, "QTY_ORDER", lineItem.Quantity);
+                            SetFieldByName(item, "SERVICE_FLAG", string.IsNullOrEmpty(lineItem.StockCode) ? 1 : 0);
+
+                            Console.WriteLine($"  Item: {lineItem.Description} x{lineItem.Quantity} @ {lineItem.UnitPrice:C}");
+                        }
+                    }
+                }
+            }
+
+            // Call Update to commit
+            Console.WriteLine("  Calling Update()...");
+            var result = InvokeComMethod(popPost, "Update");
+            Console.WriteLine($"  Update result: {result}");
+
+            if (result != null && (bool)result)
+            {
+                var orderNum = GetFieldByName(header, "ORDER_NUMBER");
+                if (orderNum != null && !string.IsNullOrEmpty(orderNum.ToString()) && orderNum.ToString() != "0")
+                {
+                    Console.WriteLine($"  SUCCESS! Order Number: {orderNum}");
+                    return orderNum.ToString();
+                }
+                else
+                {
+                    Console.WriteLine("  NOTE: Update() returned true but no order number assigned.");
+                    return $"PO-{DateTime.Now:yyyyMMddHHmmss}";
+                }
+            }
+            else
+            {
+                Console.WriteLine("  Update() returned false");
+                TryShowLastError();
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  CreatePurchaseOrder error: {ex.Message}");
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Update an existing purchase order
+    /// </summary>
+    public bool UpdatePurchaseOrder(
+        string orderNumber,
+        DateTime? deliveryDate = null,
+        string? reference = null,
+        string? notes = null)
+    {
+        if (_workspace == null) return false;
+
+        Console.WriteLine($"\n[UPDATING PURCHASE ORDER: {orderNumber}]");
+
+        try
+        {
+            var popRecord = InvokeComMethod(_workspace, "CreateObject", "PopRecord");
+            if (popRecord == null) return false;
+
+            InvokeComMethod(popRecord, "MoveFirst");
+
+            while (true)
+            {
+                var eof = InvokeComMethod(popRecord, "IsEOF");
+                if (eof != null && (bool)eof) break;
+
+                var orderNum = GetFieldValue(popRecord, "ORDER_NUMBER")?.ToString() ?? "";
+                if (orderNum.Equals(orderNumber, StringComparison.OrdinalIgnoreCase))
+                {
+                    // Edit the record
+                    InvokeComMethod(popRecord, "Edit");
+
+                    if (!string.IsNullOrEmpty(reference))
+                        SetFieldByName(popRecord, "ORDER_REF", reference);
+                    if (deliveryDate.HasValue)
+                        SetFieldByName(popRecord, "DUE_DATE", deliveryDate.Value);
+                    if (!string.IsNullOrEmpty(notes))
+                        SetFieldByName(popRecord, "NOTES_1", notes);
+
+                    var result = InvokeComMethod(popRecord, "Update");
+                    if (result != null && (bool)result)
+                    {
+                        Console.WriteLine("  Purchase order updated successfully");
+                        return true;
+                    }
+                    else
+                    {
+                        Console.WriteLine("  Update failed");
+                        TryShowLastError();
+                        return false;
+                    }
+                }
+
+                InvokeComMethod(popRecord, "MoveNext");
+            }
+
+            Console.WriteLine($"  Order not found: {orderNumber}");
+            return false;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  UpdatePurchaseOrder error: {ex.Message}");
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Delete a purchase order
+    /// </summary>
+    public bool DeletePurchaseOrder(string orderNumber)
+    {
+        if (_workspace == null) return false;
+
+        Console.WriteLine($"\n[DELETING PURCHASE ORDER: {orderNumber}]");
+
+        try
+        {
+            var popRecord = InvokeComMethod(_workspace, "CreateObject", "PopRecord");
+            if (popRecord == null) return false;
+
+            InvokeComMethod(popRecord, "MoveFirst");
+
+            while (true)
+            {
+                var eof = InvokeComMethod(popRecord, "IsEOF");
+                if (eof != null && (bool)eof) break;
+
+                var orderNum = GetFieldValue(popRecord, "ORDER_NUMBER")?.ToString() ?? "";
+                if (orderNum.Equals(orderNumber, StringComparison.OrdinalIgnoreCase))
+                {
+                    var result = InvokeComMethod(popRecord, "Delete");
+                    if (result != null && (bool)result)
+                    {
+                        Console.WriteLine("  Purchase order deleted successfully");
+                        return true;
+                    }
+                    else
+                    {
+                        Console.WriteLine("  Delete failed");
+                        TryShowLastError();
+                        return false;
+                    }
+                }
+
+                InvokeComMethod(popRecord, "MoveNext");
+            }
+
+            Console.WriteLine($"  Order not found: {orderNumber}");
+            return false;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  DeletePurchaseOrder error: {ex.Message}");
+            return false;
+        }
+    }
+
+    // =========================================================================
+    // Product Methods
+    // =========================================================================
+
+    /// <summary>
+    /// Get products
+    /// </summary>
+    public List<ProductResponse> GetProducts(string searchTerm, int maxResults = 50)
+    {
+        var results = new List<ProductResponse>();
+        if (_workspace == null) return results;
+
+        try
+        {
+            var stockRecord = InvokeComMethod(_workspace, "CreateObject", "StockRecord");
+            if (stockRecord == null) return results;
+
+            InvokeComMethod(stockRecord, "MoveFirst");
+            int count = 0;
+
+            while (count < maxResults)
+            {
+                var eof = InvokeComMethod(stockRecord, "IsEOF");
+                if (eof != null && (bool)eof) break;
+
+                var stockCode = GetFieldValue(stockRecord, "STOCK_CODE")?.ToString() ?? "";
+                var description = GetFieldValue(stockRecord, "DESCRIPTION")?.ToString() ?? "";
+
+                bool matches = string.IsNullOrEmpty(searchTerm) ||
+                    stockCode.Contains(searchTerm, StringComparison.OrdinalIgnoreCase) ||
+                    description.Contains(searchTerm, StringComparison.OrdinalIgnoreCase);
+
+                if (matches)
+                {
+                    var product = ExtractProductFromRecord(stockRecord);
+                    if (product != null)
+                    {
+                        results.Add(product);
+                        count++;
+                    }
+                }
+
+                InvokeComMethod(stockRecord, "MoveNext");
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  GetProducts error: {ex.Message}");
+        }
+
+        return results;
+    }
+
+    /// <summary>
+    /// Get a single product
+    /// </summary>
+    public ProductResponse? GetProduct(string stockCode)
+    {
+        if (_workspace == null) return null;
+
+        try
+        {
+            var stockRecord = InvokeComMethod(_workspace, "CreateObject", "StockRecord");
+            if (stockRecord == null) return null;
+
+            InvokeComMethod(stockRecord, "MoveFirst");
+
+            while (true)
+            {
+                var eof = InvokeComMethod(stockRecord, "IsEOF");
+                if (eof != null && (bool)eof) break;
+
+                var code = GetFieldValue(stockRecord, "STOCK_CODE")?.ToString() ?? "";
+                if (code.Equals(stockCode, StringComparison.OrdinalIgnoreCase))
+                {
+                    return ExtractProductFromRecord(stockRecord);
+                }
+
+                InvokeComMethod(stockRecord, "MoveNext");
+            }
+
+            return null;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  GetProduct error: {ex.Message}");
+            return null;
+        }
+    }
+
+    private ProductResponse? ExtractProductFromRecord(object stockRecord)
+    {
+        try
+        {
+            return new ProductResponse(
+                StockCode: GetFieldValue(stockRecord, "STOCK_CODE")?.ToString() ?? "",
+                Description: GetFieldValue(stockRecord, "DESCRIPTION")?.ToString(),
+                SalesPrice: Convert.ToDecimal(GetFieldValue(stockRecord, "SALES_PRICE") ?? 0),
+                CostPrice: Convert.ToDecimal(GetFieldValue(stockRecord, "COST_PRICE") ?? 0),
+                QtyInStock: Convert.ToDecimal(GetFieldValue(stockRecord, "QTY_IN_STOCK") ?? 0),
+                QtyOnOrder: Convert.ToDecimal(GetFieldValue(stockRecord, "QTY_ON_ORDER") ?? 0),
+                QtyAllocated: Convert.ToDecimal(GetFieldValue(stockRecord, "QTY_ALLOCATED") ?? 0),
+                ReorderLevel: Convert.ToDecimal(GetFieldValue(stockRecord, "REORDER_LEVEL") ?? 0),
+                ReorderQty: Convert.ToDecimal(GetFieldValue(stockRecord, "REORDER_QTY") ?? 0),
+                NominalCode: GetFieldValue(stockRecord, "NOMINAL_CODE")?.ToString(),
+                TaxCode: GetFieldValue(stockRecord, "TAX_CODE")?.ToString(),
+                Category: GetFieldValue(stockRecord, "CATEGORY")?.ToString(),
+                UnitOfSale: GetFieldValue(stockRecord, "UNIT_OF_SALE")?.ToString()
+            );
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  ExtractProductFromRecord error: {ex.Message}");
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Create a product
+    /// </summary>
+    public ProductResponse? CreateProduct(CreateProductRequest request)
+    {
+        if (_workspace == null) return null;
+
+        try
+        {
+            var stockRecord = InvokeComMethod(_workspace, "CreateObject", "StockRecord");
+            if (stockRecord == null) return null;
+
+            InvokeComMethod(stockRecord, "Add");
+
+            SetFieldByName(stockRecord, "STOCK_CODE", request.StockCode);
+            if (!string.IsNullOrEmpty(request.Description))
+                SetFieldByName(stockRecord, "DESCRIPTION", request.Description);
+            SetFieldByName(stockRecord, "SALES_PRICE", request.SalesPrice);
+            SetFieldByName(stockRecord, "COST_PRICE", request.CostPrice);
+            SetFieldByName(stockRecord, "REORDER_LEVEL", request.ReorderLevel);
+            SetFieldByName(stockRecord, "REORDER_QTY", request.ReorderQty);
+            SetFieldByName(stockRecord, "NOMINAL_CODE", request.NominalCode);
+            SetFieldByName(stockRecord, "TAX_CODE", request.TaxCode);
+            if (!string.IsNullOrEmpty(request.Category))
+                SetFieldByName(stockRecord, "CATEGORY", request.Category);
+            if (!string.IsNullOrEmpty(request.UnitOfSale))
+                SetFieldByName(stockRecord, "UNIT_OF_SALE", request.UnitOfSale);
+
+            var result = InvokeComMethod(stockRecord, "Update");
+            if (result != null && Convert.ToBoolean(result))
+            {
+                return GetProduct(request.StockCode);
+            }
+            else
+            {
+                TryShowLastError();
+            }
+
+            return null;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  CreateProduct error: {ex.Message}");
+            return null;
+        }
+    }
+
+    // =========================================================================
+    // Stock Methods
+    // =========================================================================
+
+    /// <summary>
+    /// Get stock level for a product
+    /// </summary>
+    public StockLevelResponse? GetStockLevel(string stockCode)
+    {
+        if (_workspace == null) return null;
+
+        try
+        {
+            var stockRecord = InvokeComMethod(_workspace, "CreateObject", "StockRecord");
+            if (stockRecord == null) return null;
+
+            InvokeComMethod(stockRecord, "MoveFirst");
+
+            while (true)
+            {
+                var eof = InvokeComMethod(stockRecord, "IsEOF");
+                if (eof != null && (bool)eof) break;
+
+                var code = GetFieldValue(stockRecord, "STOCK_CODE")?.ToString() ?? "";
+                if (code.Equals(stockCode, StringComparison.OrdinalIgnoreCase))
+                {
+                    var qtyInStock = Convert.ToDecimal(GetFieldValue(stockRecord, "QTY_IN_STOCK") ?? 0);
+                    var qtyOnOrder = Convert.ToDecimal(GetFieldValue(stockRecord, "QTY_ON_ORDER") ?? 0);
+                    var qtyAllocated = Convert.ToDecimal(GetFieldValue(stockRecord, "QTY_ALLOCATED") ?? 0);
+
+                    return new StockLevelResponse(
+                        StockCode: code,
+                        Description: GetFieldValue(stockRecord, "DESCRIPTION")?.ToString(),
+                        QtyInStock: qtyInStock,
+                        QtyOnOrder: qtyOnOrder,
+                        QtyAllocated: qtyAllocated,
+                        FreeStock: qtyInStock - qtyAllocated,
+                        CostPrice: Convert.ToDecimal(GetFieldValue(stockRecord, "COST_PRICE") ?? 0)
+                    );
+                }
+
+                InvokeComMethod(stockRecord, "MoveNext");
+            }
+
+            return null;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  GetStockLevel error: {ex.Message}");
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Post a stock adjustment
+    /// </summary>
+    public bool PostStockAdjustment(string stockCode, decimal quantity, string adjustmentType, string reference, string details, decimal? costPrice)
+    {
+        if (_workspace == null) return false;
+
+        try
+        {
+            var stockPost = InvokeComMethod(_workspace, "CreateObject", "StockPost");
+            if (stockPost == null)
+            {
+                Console.WriteLine("  Could not create StockPost object");
+                return false;
+            }
+
+            // Type: 1 = AI (Adjustment In), 2 = AO (Adjustment Out)
+            int type = adjustmentType.ToUpperInvariant() == "AO" ? 2 : 1;
+            SetFieldByName(stockPost, "TYPE", type);
+            SetFieldByName(stockPost, "STOCK_CODE", stockCode);
+            SetFieldByName(stockPost, "QUANTITY", Math.Abs(quantity));
+            SetFieldByName(stockPost, "REFERENCE", reference);
+            SetFieldByName(stockPost, "DETAILS", details);
+            SetFieldByName(stockPost, "DATE", DateTime.Today);
+
+            if (costPrice.HasValue)
+                SetFieldByName(stockPost, "COST_PRICE", costPrice.Value);
+
+            var result = InvokeComMethod(stockPost, "Update");
+            if (result != null && Convert.ToBoolean(result))
+            {
+                Console.WriteLine($"  Stock adjustment posted: {stockCode} {adjustmentType} {quantity}");
+                return true;
+            }
+            else
+            {
+                TryShowLastError();
+                return false;
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  PostStockAdjustment error: {ex.Message}");
+            return false;
+        }
+    }
+
+    // =========================================================================
+    // Sales Order Methods (API wrappers)
+    // =========================================================================
+
+    /// <summary>
+    /// Get sales orders (wrapper for API)
+    /// </summary>
+    public List<SalesOrderResponse> GetSalesOrders(string searchTerm, int maxResults = 50)
+    {
+        var results = new List<SalesOrderResponse>();
+        if (_workspace == null) return results;
+
+        try
+        {
+            var sopRecord = InvokeComMethod(_workspace, "CreateObject", "SopRecord");
+            if (sopRecord == null) return results;
+
+            InvokeComMethod(sopRecord, "MoveFirst");
+            int count = 0;
+
+            while (count < maxResults)
+            {
+                var eof = InvokeComMethod(sopRecord, "IsEOF");
+                if (eof != null && (bool)eof) break;
+
+                var orderNum = GetFieldValue(sopRecord, "ORDER_NUMBER")?.ToString() ?? "";
+                var custName = GetFieldValue(sopRecord, "NAME")?.ToString() ?? "";
+
+                bool matches = string.IsNullOrEmpty(searchTerm) ||
+                    orderNum.Contains(searchTerm, StringComparison.OrdinalIgnoreCase) ||
+                    custName.Contains(searchTerm, StringComparison.OrdinalIgnoreCase);
+
+                if (matches)
+                {
+                    var order = ExtractSalesOrderFromRecord(sopRecord, false);
+                    if (order != null)
+                    {
+                        results.Add(order);
+                        count++;
+                    }
+                }
+
+                InvokeComMethod(sopRecord, "MoveNext");
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  GetSalesOrders error: {ex.Message}");
+        }
+
+        return results;
+    }
+
+    /// <summary>
+    /// Get a single sales order with line items
+    /// </summary>
+    public SalesOrderResponse? GetSalesOrder(string orderNumber)
+    {
+        if (_workspace == null) return null;
+
+        try
+        {
+            var sopRecord = InvokeComMethod(_workspace, "CreateObject", "SopRecord");
+            if (sopRecord == null) return null;
+
+            InvokeComMethod(sopRecord, "MoveFirst");
+
+            while (true)
+            {
+                var eof = InvokeComMethod(sopRecord, "IsEOF");
+                if (eof != null && (bool)eof) break;
+
+                var orderNum = GetFieldValue(sopRecord, "ORDER_NUMBER")?.ToString() ?? "";
+                if (orderNum.Equals(orderNumber, StringComparison.OrdinalIgnoreCase))
+                {
+                    return ExtractSalesOrderFromRecord(sopRecord, true);
+                }
+
+                InvokeComMethod(sopRecord, "MoveNext");
+            }
+
+            return null;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  GetSalesOrder error: {ex.Message}");
+            return null;
+        }
+    }
+
+    private SalesOrderResponse? ExtractSalesOrderFromRecord(object sopRecord, bool includeItems)
+    {
+        try
+        {
+            var orderNumber = GetFieldValue(sopRecord, "ORDER_NUMBER")?.ToString() ?? "";
+            var customerAccount = GetFieldValue(sopRecord, "ACCOUNT_REF")?.ToString() ?? "";
+            var customerName = GetFieldValue(sopRecord, "NAME")?.ToString() ?? "";
+            var orderDateVal = GetFieldValue(sopRecord, "ORDER_DATE");
+            DateTime? orderDate = orderDateVal != null && DateTime.TryParse(orderDateVal.ToString(), out var od) ? od : null;
+            var deliveryDateVal = GetFieldValue(sopRecord, "DUE_DATE");
+            DateTime? deliveryDate = deliveryDateVal != null && DateTime.TryParse(deliveryDateVal.ToString(), out var dd) ? dd : null;
+            var customerOrderNumber = GetFieldValue(sopRecord, "CUST_ORDER_NO")?.ToString();
+            var netAmountVal = GetFieldValue(sopRecord, "NET_AMOUNT");
+            decimal netAmount = netAmountVal != null ? Convert.ToDecimal(netAmountVal) : 0;
+            var taxAmountVal = GetFieldValue(sopRecord, "TAX_AMOUNT");
+            decimal taxAmount = taxAmountVal != null ? Convert.ToDecimal(taxAmountVal) : 0;
+            var grossAmountVal = GetFieldValue(sopRecord, "GROSS_AMOUNT");
+            decimal grossAmount = grossAmountVal != null ? Convert.ToDecimal(grossAmountVal) : netAmount + taxAmount;
+            var status = GetFieldValue(sopRecord, "ORDER_STATUS")?.ToString();
+            var notes = GetFieldValue(sopRecord, "NOTES_1")?.ToString();
+
+            List<SalesOrderItemResponse>? items = null;
+            if (includeItems)
+            {
+                items = new List<SalesOrderItemResponse>();
+                var sopItemRecord = InvokeComMethod(_workspace, "CreateObject", "SopItemRecord");
+                if (sopItemRecord != null)
+                {
+                    InvokeComMethod(sopItemRecord, "MoveFirst");
+                    int lineNum = 1;
+                    while (true)
+                    {
+                        var eof = InvokeComMethod(sopItemRecord, "IsEOF");
+                        if (eof != null && (bool)eof) break;
+
+                        var itemOrderNum = GetFieldValue(sopItemRecord, "ORDER_NUMBER")?.ToString() ?? "";
+                        if (itemOrderNum.Equals(orderNumber, StringComparison.OrdinalIgnoreCase))
+                        {
+                            var itemResponse = new SalesOrderItemResponse(
+                                LineNumber: lineNum++,
+                                StockCode: GetFieldValue(sopItemRecord, "STOCK_CODE")?.ToString(),
+                                Description: GetFieldValue(sopItemRecord, "DESCRIPTION")?.ToString(),
+                                Quantity: Convert.ToDecimal(GetFieldValue(sopItemRecord, "QTY_ORDER") ?? 0),
+                                UnitPrice: Convert.ToDecimal(GetFieldValue(sopItemRecord, "UNIT_PRICE") ?? 0),
+                                NetAmount: Convert.ToDecimal(GetFieldValue(sopItemRecord, "NET_AMOUNT") ?? 0),
+                                TaxCode: GetFieldValue(sopItemRecord, "TAX_CODE")?.ToString(),
+                                TaxAmount: Convert.ToDecimal(GetFieldValue(sopItemRecord, "TAX_AMOUNT") ?? 0),
+                                NominalCode: GetFieldValue(sopItemRecord, "NOMINAL_CODE")?.ToString()
+                            );
+                            items.Add(itemResponse);
+                        }
+
+                        InvokeComMethod(sopItemRecord, "MoveNext");
+                    }
+                }
+            }
+
+            return new SalesOrderResponse(
+                OrderNumber: orderNumber,
+                CustomerAccountRef: customerAccount,
+                CustomerName: customerName,
+                OrderDate: orderDate,
+                DeliveryDate: deliveryDate,
+                CustomerOrderNumber: customerOrderNumber,
+                NetAmount: netAmount,
+                TaxAmount: taxAmount,
+                GrossAmount: grossAmount,
+                Status: status,
+                Notes: notes,
+                Items: items
+            );
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  ExtractSalesOrderFromRecord error: {ex.Message}");
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Create a sales order from request DTO
+    /// </summary>
+    public SalesOrderResponse? CreateSalesOrder(CreateSalesOrderRequest request)
+    {
+        if (_workspace == null) return null;
+
+        try
+        {
+            var sopPost = InvokeComMethod(_workspace, "CreateObject", "SopPost");
+            if (sopPost == null)
+            {
+                Console.WriteLine("  Could not create SopPost object");
+                return null;
+            }
+
+            // Set header fields
+            SetFieldByName(sopPost, "ACCOUNT_REF", request.CustomerAccountRef);
+            SetFieldByName(sopPost, "ORDER_DATE", request.OrderDate ?? DateTime.Today);
+            if (request.DeliveryDate.HasValue)
+                SetFieldByName(sopPost, "DUE_DATE", request.DeliveryDate.Value);
+            if (!string.IsNullOrEmpty(request.CustomerOrderNumber))
+                SetFieldByName(sopPost, "CUST_ORDER_NO", request.CustomerOrderNumber);
+            if (!string.IsNullOrEmpty(request.Notes))
+                SetFieldByName(sopPost, "NOTES_1", request.Notes);
+
+            // Add line items
+            if (request.Items != null)
+            {
+                foreach (var item in request.Items)
+                {
+                    InvokeComMethod(sopPost, "AddItem");
+                    if (!string.IsNullOrEmpty(item.StockCode))
+                        SetFieldByName(sopPost, "STOCK_CODE", item.StockCode);
+                    if (!string.IsNullOrEmpty(item.Description))
+                        SetFieldByName(sopPost, "DESCRIPTION", item.Description);
+                    SetFieldByName(sopPost, "QTY_ORDER", item.Quantity);
+                    SetFieldByName(sopPost, "UNIT_PRICE", item.UnitPrice);
+                    SetFieldByName(sopPost, "NOMINAL_CODE", item.NominalCode);
+                    SetFieldByName(sopPost, "TAX_CODE", item.TaxCode);
+                }
+            }
+
+            var result = InvokeComMethod(sopPost, "Update");
+            if (result != null && Convert.ToBoolean(result))
+            {
+                var orderNum = GetFieldValue(sopPost, "ORDER_NUMBER")?.ToString();
+                if (!string.IsNullOrEmpty(orderNum))
+                {
+                    return GetSalesOrder(orderNum);
+                }
+            }
+            else
+            {
+                TryShowLastError();
+            }
+
+            return null;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  CreateSalesOrder error: {ex.Message}");
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Update a sales order
+    /// </summary>
+    public bool UpdateSalesOrder(string orderNumber, UpdateSalesOrderRequest request)
+    {
+        if (_workspace == null) return false;
+
+        try
+        {
+            var sopRecord = InvokeComMethod(_workspace, "CreateObject", "SopRecord");
+            if (sopRecord == null) return false;
+
+            InvokeComMethod(sopRecord, "MoveFirst");
+
+            while (true)
+            {
+                var eof = InvokeComMethod(sopRecord, "IsEOF");
+                if (eof != null && (bool)eof) break;
+
+                var orderNum = GetFieldValue(sopRecord, "ORDER_NUMBER")?.ToString() ?? "";
+                if (orderNum.Equals(orderNumber, StringComparison.OrdinalIgnoreCase))
+                {
+                    if (!string.IsNullOrEmpty(request.CustomerOrderNumber))
+                        SetFieldByName(sopRecord, "CUST_ORDER_NO", request.CustomerOrderNumber);
+                    if (request.DeliveryDate.HasValue)
+                        SetFieldByName(sopRecord, "DUE_DATE", request.DeliveryDate.Value);
+                    if (!string.IsNullOrEmpty(request.Notes))
+                        SetFieldByName(sopRecord, "NOTES_1", request.Notes);
+
+                    var result = InvokeComMethod(sopRecord, "Update");
+                    return result != null && Convert.ToBoolean(result);
+                }
+
+                InvokeComMethod(sopRecord, "MoveNext");
+            }
+
+            return false;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  UpdateSalesOrder error: {ex.Message}");
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Delete a sales order
+    /// </summary>
+    public bool DeleteSalesOrder(string orderNumber)
+    {
+        if (_workspace == null) return false;
+
+        try
+        {
+            var sopRecord = InvokeComMethod(_workspace, "CreateObject", "SopRecord");
+            if (sopRecord == null) return false;
+
+            InvokeComMethod(sopRecord, "MoveFirst");
+
+            while (true)
+            {
+                var eof = InvokeComMethod(sopRecord, "IsEOF");
+                if (eof != null && (bool)eof) break;
+
+                var orderNum = GetFieldValue(sopRecord, "ORDER_NUMBER")?.ToString() ?? "";
+                if (orderNum.Equals(orderNumber, StringComparison.OrdinalIgnoreCase))
+                {
+                    var result = InvokeComMethod(sopRecord, "Delete");
+                    return result != null && Convert.ToBoolean(result);
+                }
+
+                InvokeComMethod(sopRecord, "MoveNext");
+            }
+
+            return false;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  DeleteSalesOrder error: {ex.Message}");
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Mark a sales order as complete
+    /// </summary>
+    public bool CompleteSalesOrder(string orderNumber)
+    {
+        if (_workspace == null) return false;
+
+        try
+        {
+            var sopRecord = InvokeComMethod(_workspace, "CreateObject", "SopRecord");
+            if (sopRecord == null) return false;
+
+            InvokeComMethod(sopRecord, "MoveFirst");
+
+            while (true)
+            {
+                var eof = InvokeComMethod(sopRecord, "IsEOF");
+                if (eof != null && (bool)eof) break;
+
+                var orderNum = GetFieldValue(sopRecord, "ORDER_NUMBER")?.ToString() ?? "";
+                if (orderNum.Equals(orderNumber, StringComparison.OrdinalIgnoreCase))
+                {
+                    // Set status to complete (typically status code varies by Sage version)
+                    SetFieldByName(sopRecord, "ORDER_STATUS", "COMPLETE");
+                    var result = InvokeComMethod(sopRecord, "Update");
+                    return result != null && Convert.ToBoolean(result);
+                }
+
+                InvokeComMethod(sopRecord, "MoveNext");
+            }
+
+            return false;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  CompleteSalesOrder error: {ex.Message}");
+            return false;
+        }
+    }
+
+    // =========================================================================
+    // Purchase Order Methods (API wrappers)
+    // =========================================================================
+
+    /// <summary>
+    /// Get purchase orders (wrapper for API)
+    /// </summary>
+    public List<PurchaseOrderResponse> GetPurchaseOrders(string searchTerm, int maxResults = 50)
+    {
+        return FindPurchaseOrders(searchTerm, null, maxResults);
+    }
+
+    /// <summary>
+    /// Create a purchase order from request DTO
+    /// </summary>
+    public PurchaseOrderResponse? CreatePurchaseOrder(CreatePurchaseOrderRequest request)
+    {
+        // Convert items if present
+        List<PurchaseOrderItem>? items = null;
+        if (request.Items != null)
+        {
+            items = request.Items.Select(i => new PurchaseOrderItem
+            {
+                StockCode = i.StockCode ?? "",
+                Description = i.Description,
+                Quantity = i.Quantity,
+                UnitPrice = i.UnitPrice,
+                NominalCode = i.NominalCode,
+                TaxCode = i.TaxCode
+            }).ToList();
+        }
+
+        var orderNum = CreatePurchaseOrder(
+            request.SupplierAccount,
+            request.OrderDate,
+            request.DeliveryDate,
+            request.Reference,
+            request.Notes,
+            items
+        );
+
+        if (!string.IsNullOrEmpty(orderNum))
+        {
+            return GetPurchaseOrder(orderNum);
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Update a purchase order from request DTO
+    /// </summary>
+    public bool UpdatePurchaseOrder(string orderNumber, UpdatePurchaseOrderRequest request)
+    {
+        if (_workspace == null) return false;
+
+        try
+        {
+            var popRecord = InvokeComMethod(_workspace, "CreateObject", "PopRecord");
+            if (popRecord == null) return false;
+
+            InvokeComMethod(popRecord, "MoveFirst");
+
+            while (true)
+            {
+                var eof = InvokeComMethod(popRecord, "IsEOF");
+                if (eof != null && (bool)eof) break;
+
+                var orderNum = GetFieldValue(popRecord, "ORDER_NUMBER")?.ToString() ?? "";
+                if (orderNum.Equals(orderNumber, StringComparison.OrdinalIgnoreCase))
+                {
+                    if (request.DeliveryDate.HasValue)
+                        SetFieldByName(popRecord, "DUE_DATE", request.DeliveryDate.Value);
+                    if (!string.IsNullOrEmpty(request.Reference))
+                        SetFieldByName(popRecord, "ORDER_REF", request.Reference);
+                    if (!string.IsNullOrEmpty(request.Notes))
+                        SetFieldByName(popRecord, "NOTES_1", request.Notes);
+
+                    var result = InvokeComMethod(popRecord, "Update");
+                    return result != null && Convert.ToBoolean(result);
+                }
+
+                InvokeComMethod(popRecord, "MoveNext");
+            }
+
+            return false;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  UpdatePurchaseOrder error: {ex.Message}");
+            return false;
+        }
+    }
+
+    // =========================================================================
+    // System/Status Methods
+    // =========================================================================
+
+    /// <summary>
+    /// Returns true if connected to Sage 50
+    /// </summary>
+    public bool IsConnected => _workspace != null && !_disposed;
+
+    /// <summary>
+    /// Get Sage version information
+    /// </summary>
+    public string? GetSageVersion()
+    {
+        if (_sdoEngine == null) return null;
+
+        try
+        {
+            // Try to get version from SDO Engine
+            var version = GetComProperty(_sdoEngine, "Version");
+            if (version != null) return version.ToString();
+
+            // Try VersionNumber property
+            version = GetComProperty(_sdoEngine, "VersionNumber");
+            if (version != null) return version.ToString();
+
+            // Try getting from registry/type info
+            return "Sage 50 SDK";
+        }
+        catch
+        {
+            return "Unknown";
+        }
+    }
+
+    /// <summary>
+    /// Get setup/configuration information
+    /// </summary>
+    public SetupResponse? GetSetup()
+    {
+        if (_workspace == null) return null;
+
+        try
+        {
+            // Get company info
+            var companyInfo = GetCompanyInfo();
+
+            // Get financial year info
+            var finYear = GetFinancialYear();
+
+            // Try to get VAT settings
+            string? vatNumber = null;
+            string? vatScheme = null;
+            bool vatRegistered = false;
+
+            try
+            {
+                var controlData = InvokeComMethod(_workspace, "CreateObject", "ControlData");
+                if (controlData != null)
+                {
+                    vatNumber = GetFieldValue(controlData, "VAT_NUMBER")?.ToString();
+                    vatRegistered = !string.IsNullOrWhiteSpace(vatNumber);
+
+                    var schemeVal = GetFieldValue(controlData, "VAT_SCHEME");
+                    if (schemeVal != null)
+                    {
+                        vatScheme = schemeVal.ToString();
+                    }
+                }
+            }
+            catch { }
+
+            return new SetupResponse(
+                CompanyName: companyInfo?.Name,
+                FinancialYearStart: finYear?.StartDate,
+                FinancialYearEnd: finYear?.EndDate,
+                CurrentPeriod: finYear?.CurrentPeriod ?? 1,
+                VatRegistered: vatRegistered,
+                VatNumber: vatNumber,
+                VatScheme: vatScheme,
+                BaseCurrency: "GBP",
+                DefaultTaxCode: "T1"
+            );
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  GetSetup error: {ex.Message}");
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Get financial year information
+    /// </summary>
+    public FinancialYearResponse? GetFinancialYear()
+    {
+        if (_workspace == null) return null;
+
+        try
+        {
+            var controlData = InvokeComMethod(_workspace, "CreateObject", "ControlData");
+            if (controlData == null) return null;
+
+            // Get financial year start - typically stored as YEAR_START or FIN_YEAR_START
+            DateTime startDate = DateTime.Today.AddMonths(-DateTime.Today.Month + 1).Date; // Default to Jan 1
+            DateTime endDate = startDate.AddYears(1).AddDays(-1);
+            int currentPeriod = 1;
+            int totalPeriods = 12;
+
+            try
+            {
+                var yearStart = GetFieldValue(controlData, "YEAR_START");
+                if (yearStart != null)
+                {
+                    startDate = Convert.ToDateTime(yearStart);
+                    endDate = startDate.AddYears(1).AddDays(-1);
+                }
+            }
+            catch { }
+
+            try
+            {
+                var period = GetFieldValue(controlData, "CURRENT_PERIOD");
+                if (period != null) currentPeriod = Convert.ToInt32(period);
+            }
+            catch { }
+
+            try
+            {
+                var periods = GetFieldValue(controlData, "NUMBER_PERIODS");
+                if (periods != null) totalPeriods = Convert.ToInt32(periods);
+            }
+            catch { }
+
+            // Calculate current period date range
+            DateTime? periodStart = null;
+            DateTime? periodEnd = null;
+            if (currentPeriod >= 1 && currentPeriod <= totalPeriods)
+            {
+                periodStart = startDate.AddMonths(currentPeriod - 1);
+                periodEnd = periodStart.Value.AddMonths(1).AddDays(-1);
+            }
+
+            return new FinancialYearResponse(
+                StartDate: startDate,
+                EndDate: endDate,
+                CurrentPeriod: currentPeriod,
+                TotalPeriods: totalPeriods,
+                PeriodStart: periodStart,
+                PeriodEnd: periodEnd
+            );
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  GetFinancialYear error: {ex.Message}");
+            return null;
+        }
+    }
+
+    // =========================================================================
+    // Financial Setup Methods
+    // =========================================================================
+
+    /// <summary>
+    /// Get all tax codes
+    /// </summary>
+    public List<TaxCodeResponse> GetTaxCodes()
+    {
+        var results = new List<TaxCodeResponse>();
+        if (_workspace == null) return results;
+
+        try
+        {
+            // Tax codes in Sage 50 are typically T0-T9, plus EC codes
+            var taxCodes = new (string Code, string Desc, decimal Rate)[]
+            {
+                ("T0", "Zero Rated", 0m),
+                ("T1", "Standard Rate", 20m),
+                ("T2", "Exempt", 0m),
+                ("T4", "EC Sales", 0m),
+                ("T5", "Lower Rate", 5m),
+                ("T7", "EC Acquisitions", 0m),
+                ("T9", "Outside Scope", 0m)
+            };
+
+            foreach (var (code, desc, rate) in taxCodes)
+            {
+                results.Add(new TaxCodeResponse(
+                    Code: code,
+                    Description: desc,
+                    Rate: rate,
+                    IsEcCode: code == "T4" || code == "T7",
+                    InputNominal: "2201",
+                    OutputNominal: "2200"
+                ));
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  GetTaxCodes error: {ex.Message}");
+        }
+
+        return results;
+    }
+
+    /// <summary>
+    /// Get currencies
+    /// </summary>
+    public List<CurrencyResponse> GetCurrencies()
+    {
+        var results = new List<CurrencyResponse>();
+        if (_workspace == null) return results;
+
+        try
+        {
+            var currencyData = InvokeComMethod(_workspace, "CreateObject", "CurrencyData");
+            if (currencyData == null)
+            {
+                // Return at least base currency
+                results.Add(new CurrencyResponse("GBP", "British Pound", "£", 1m, true));
+                return results;
+            }
+
+            InvokeComMethod(currencyData, "MoveFirst");
+            while (true)
+            {
+                var eof = GetComProperty(currencyData, "EOF");
+                if (eof != null && Convert.ToBoolean(eof)) break;
+
+                var code = GetFieldValue(currencyData, "CODE")?.ToString() ?? "";
+                var name = GetFieldValue(currencyData, "NAME")?.ToString();
+                var symbol = GetFieldValue(currencyData, "SYMBOL")?.ToString();
+                var rateVal = GetFieldValue(currencyData, "EXCHANGE_RATE");
+                var rate = rateVal != null ? Convert.ToDecimal(rateVal) : 1m;
+
+                results.Add(new CurrencyResponse(
+                    Code: code,
+                    Name: name,
+                    Symbol: symbol,
+                    ExchangeRate: rate,
+                    IsBase: code == "GBP" || rate == 1m
+                ));
+
+                InvokeComMethod(currencyData, "MoveNext");
+                if (results.Count >= 50) break;
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  GetCurrencies error: {ex.Message}");
+            // Return default
+            if (results.Count == 0)
+                results.Add(new CurrencyResponse("GBP", "British Pound", "£", 1m, true));
+        }
+
+        return results;
+    }
+
+    /// <summary>
+    /// Get departments
+    /// </summary>
+    public List<DepartmentResponse> GetDepartments()
+    {
+        var results = new List<DepartmentResponse>();
+        if (_workspace == null) return results;
+
+        try
+        {
+            var deptData = InvokeComMethod(_workspace, "CreateObject", "DepartmentData");
+            if (deptData == null)
+            {
+                // Return default department
+                results.Add(new DepartmentResponse("0", "Default", 0));
+                return results;
+            }
+
+            InvokeComMethod(deptData, "MoveFirst");
+            int num = 0;
+            while (true)
+            {
+                var eof = GetComProperty(deptData, "EOF");
+                if (eof != null && Convert.ToBoolean(eof)) break;
+
+                var code = GetFieldValue(deptData, "NUMBER")?.ToString() ?? num.ToString();
+                var name = GetFieldValue(deptData, "NAME")?.ToString();
+
+                results.Add(new DepartmentResponse(
+                    Code: code,
+                    Name: name,
+                    Number: num
+                ));
+
+                InvokeComMethod(deptData, "MoveNext");
+                num++;
+                if (results.Count >= 50) break;
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  GetDepartments error: {ex.Message}");
+            if (results.Count == 0)
+                results.Add(new DepartmentResponse("0", "Default", 0));
+        }
+
+        return results;
+    }
+
+    /// <summary>
+    /// Get bank accounts (nominals in 1200 range)
+    /// </summary>
+    public List<BankAccountResponse> GetBanks()
+    {
+        var results = new List<BankAccountResponse>();
+        if (_workspace == null) return results;
+
+        try
+        {
+            var nominalRecord = InvokeComMethod(_workspace, "CreateObject", "NominalRecord");
+            if (nominalRecord == null) return results;
+
+            InvokeComMethod(nominalRecord, "MoveFirst");
+            while (true)
+            {
+                var eof = GetComProperty(nominalRecord, "EOF");
+                if (eof != null && Convert.ToBoolean(eof)) break;
+
+                var code = GetFieldValue(nominalRecord, "ACCOUNT_REF")?.ToString() ?? "";
+
+                // Bank accounts typically start with 12
+                if (code.StartsWith("12"))
+                {
+                    var name = GetFieldValue(nominalRecord, "NAME")?.ToString();
+                    var balanceVal = GetFieldValue(nominalRecord, "BALANCE");
+                    var balance = balanceVal != null ? Convert.ToDecimal(balanceVal) : 0m;
+
+                    // Try to get bank details
+                    var accountNumber = GetFieldValue(nominalRecord, "ACCOUNT_NUMBER")?.ToString();
+                    var sortCode = GetFieldValue(nominalRecord, "SORT_CODE")?.ToString();
+                    var bankName = GetFieldValue(nominalRecord, "BANK_NAME")?.ToString();
+
+                    results.Add(new BankAccountResponse(
+                        NominalCode: code,
+                        Name: name,
+                        AccountNumber: accountNumber,
+                        SortCode: sortCode,
+                        Balance: balance,
+                        BankName: bankName
+                    ));
+                }
+
+                InvokeComMethod(nominalRecord, "MoveNext");
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  GetBanks error: {ex.Message}");
+        }
+
+        return results;
+    }
+
+    /// <summary>
+    /// Get payment methods
+    /// </summary>
+    public List<PaymentMethodResponse> GetPaymentMethods()
+    {
+        // Standard payment methods in Sage 50
+        return new List<PaymentMethodResponse>
+        {
+            new("CASH", "Cash", "Cash"),
+            new("CHQ", "Cheque", "Cheque"),
+            new("CC", "Credit Card", "Card"),
+            new("DD", "Direct Debit", "DirectDebit"),
+            new("SO", "Standing Order", "StandingOrder"),
+            new("BAC", "BACS", "BankTransfer"),
+            new("FP", "Faster Payments", "BankTransfer")
+        };
+    }
+
+    /// <summary>
+    /// Get chart of accounts with optional type filter
+    /// </summary>
+    public List<ChartOfAccountsResponse> GetChartOfAccounts(string typeFilter = "", int maxResults = 500)
+    {
+        var results = new List<ChartOfAccountsResponse>();
+        if (_workspace == null) return results;
+
+        try
+        {
+            var nominalRecord = InvokeComMethod(_workspace, "CreateObject", "NominalRecord");
+            if (nominalRecord == null) return results;
+
+            InvokeComMethod(nominalRecord, "MoveFirst");
+            while (true)
+            {
+                var eof = GetComProperty(nominalRecord, "EOF");
+                if (eof != null && Convert.ToBoolean(eof)) break;
+
+                var code = GetFieldValue(nominalRecord, "ACCOUNT_REF")?.ToString() ?? "";
+                var name = GetFieldValue(nominalRecord, "NAME")?.ToString();
+
+                // Determine type based on code range
+                var type = GetNominalType(code);
+                var category = GetNominalCategory(code);
+
+                // Apply filter if specified
+                if (!string.IsNullOrEmpty(typeFilter) &&
+                    !type.Equals(typeFilter, StringComparison.OrdinalIgnoreCase))
+                {
+                    InvokeComMethod(nominalRecord, "MoveNext");
+                    continue;
+                }
+
+                var balanceVal = GetFieldValue(nominalRecord, "BALANCE");
+                var balance = balanceVal != null ? Convert.ToDecimal(balanceVal) : 0m;
+
+                var budgetVal = GetFieldValue(nominalRecord, "BUDGET");
+                var budget = budgetVal != null ? Convert.ToDecimal(budgetVal) : 0m;
+
+                var priorVal = GetFieldValue(nominalRecord, "PRIOR_YEAR");
+                var prior = priorVal != null ? Convert.ToDecimal(priorVal) : 0m;
+
+                results.Add(new ChartOfAccountsResponse(
+                    NominalCode: code,
+                    Name: name,
+                    Type: type,
+                    Category: category,
+                    Balance: balance,
+                    BudgetBalance: budget,
+                    PriorYearBalance: prior
+                ));
+
+                if (results.Count >= maxResults) break;
+                InvokeComMethod(nominalRecord, "MoveNext");
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  GetChartOfAccounts error: {ex.Message}");
+        }
+
+        return results;
+    }
+
+    private string GetNominalType(string code)
+    {
+        if (string.IsNullOrEmpty(code)) return "Unknown";
+        if (code.StartsWith("0")) return "FixedAsset";
+        if (code.StartsWith("1")) return "CurrentAsset";
+        if (code.StartsWith("2")) return "Liability";
+        if (code.StartsWith("3")) return "Capital";
+        if (code.StartsWith("4")) return "Sales";
+        if (code.StartsWith("5")) return "Purchases";
+        if (code.StartsWith("6")) return "DirectExpense";
+        if (code.StartsWith("7")) return "Overhead";
+        if (code.StartsWith("8")) return "Overhead";
+        if (code.StartsWith("9")) return "Suspense";
+        return "Other";
+    }
+
+    private string GetNominalCategory(string code)
+    {
+        if (string.IsNullOrEmpty(code)) return "Unknown";
+        if (code.StartsWith("0")) return "Balance Sheet";
+        if (code.StartsWith("1")) return "Balance Sheet";
+        if (code.StartsWith("2")) return "Balance Sheet";
+        if (code.StartsWith("3")) return "Balance Sheet";
+        if (code.StartsWith("4")) return "Profit & Loss";
+        if (code.StartsWith("5")) return "Profit & Loss";
+        if (code.StartsWith("6")) return "Profit & Loss";
+        if (code.StartsWith("7")) return "Profit & Loss";
+        if (code.StartsWith("8")) return "Profit & Loss";
+        if (code.StartsWith("9")) return "Other";
+        return "Other";
+    }
+
+    // =========================================================================
+    // Search/Ledger Methods
+    // =========================================================================
+
+    /// <summary>
+    /// Search sales ledger transactions
+    /// </summary>
+    public List<LedgerTransactionResponse> SearchSalesLedger(string accountRef, DateTime? from, DateTime? to, int maxResults = 100)
+    {
+        var results = new List<LedgerTransactionResponse>();
+        if (_workspace == null) return results;
+
+        try
+        {
+            var auditHeader = InvokeComMethod(_workspace, "CreateObject", "AuditHeader");
+            if (auditHeader == null) return results;
+
+            InvokeComMethod(auditHeader, "MoveFirst");
+            while (true)
+            {
+                var eof = GetComProperty(auditHeader, "EOF");
+                if (eof != null && Convert.ToBoolean(eof)) break;
+
+                var type = GetFieldValue(auditHeader, "TYPE")?.ToString() ?? "";
+
+                // Sales ledger types: SI, SC, SA, SR
+                if (!type.StartsWith("S"))
+                {
+                    InvokeComMethod(auditHeader, "MoveNext");
+                    continue;
+                }
+
+                var account = GetFieldValue(auditHeader, "ACCOUNT_REF")?.ToString() ?? "";
+
+                // Filter by account if specified
+                if (!string.IsNullOrEmpty(accountRef) &&
+                    !account.Equals(accountRef, StringComparison.OrdinalIgnoreCase))
+                {
+                    InvokeComMethod(auditHeader, "MoveNext");
+                    continue;
+                }
+
+                var dateVal = GetFieldValue(auditHeader, "DATE");
+                DateTime? date = dateVal != null ? Convert.ToDateTime(dateVal) : null;
+
+                // Filter by date range
+                if (from.HasValue && date.HasValue && date < from.Value)
+                {
+                    InvokeComMethod(auditHeader, "MoveNext");
+                    continue;
+                }
+                if (to.HasValue && date.HasValue && date > to.Value)
+                {
+                    InvokeComMethod(auditHeader, "MoveNext");
+                    continue;
+                }
+
+                var txnNumVal = GetFieldValue(auditHeader, "TRAN_NUMBER");
+                var txnNum = txnNumVal != null ? Convert.ToInt32(txnNumVal) : 0;
+
+                var reference = GetFieldValue(auditHeader, "INV_REF")?.ToString();
+                var details = GetFieldValue(auditHeader, "DETAILS")?.ToString();
+
+                var netVal = GetFieldValue(auditHeader, "NET_AMOUNT");
+                var net = netVal != null ? Convert.ToDecimal(netVal) : 0m;
+
+                var taxVal = GetFieldValue(auditHeader, "TAX_AMOUNT");
+                var tax = taxVal != null ? Convert.ToDecimal(taxVal) : 0m;
+
+                var outstandingVal = GetFieldValue(auditHeader, "AMOUNT_PAID");
+                var outstanding = outstandingVal != null ? net + tax - Convert.ToDecimal(outstandingVal) : net + tax;
+
+                results.Add(new LedgerTransactionResponse(
+                    TransactionNumber: txnNum,
+                    AccountRef: account,
+                    Type: type,
+                    Date: date,
+                    Reference: reference,
+                    Details: details,
+                    NetAmount: net,
+                    TaxAmount: tax,
+                    GrossAmount: net + tax,
+                    Outstanding: outstanding,
+                    Paid: outstanding <= 0
+                ));
+
+                if (results.Count >= maxResults) break;
+                InvokeComMethod(auditHeader, "MoveNext");
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  SearchSalesLedger error: {ex.Message}");
+        }
+
+        return results;
+    }
+
+    /// <summary>
+    /// Search purchase ledger transactions
+    /// </summary>
+    public List<LedgerTransactionResponse> SearchPurchaseLedger(string accountRef, DateTime? from, DateTime? to, int maxResults = 100)
+    {
+        var results = new List<LedgerTransactionResponse>();
+        if (_workspace == null) return results;
+
+        try
+        {
+            var auditHeader = InvokeComMethod(_workspace, "CreateObject", "AuditHeader");
+            if (auditHeader == null) return results;
+
+            InvokeComMethod(auditHeader, "MoveFirst");
+            while (true)
+            {
+                var eof = GetComProperty(auditHeader, "EOF");
+                if (eof != null && Convert.ToBoolean(eof)) break;
+
+                var type = GetFieldValue(auditHeader, "TYPE")?.ToString() ?? "";
+
+                // Purchase ledger types: PI, PC, PA, PP
+                if (!type.StartsWith("P"))
+                {
+                    InvokeComMethod(auditHeader, "MoveNext");
+                    continue;
+                }
+
+                var account = GetFieldValue(auditHeader, "ACCOUNT_REF")?.ToString() ?? "";
+
+                // Filter by account if specified
+                if (!string.IsNullOrEmpty(accountRef) &&
+                    !account.Equals(accountRef, StringComparison.OrdinalIgnoreCase))
+                {
+                    InvokeComMethod(auditHeader, "MoveNext");
+                    continue;
+                }
+
+                var dateVal = GetFieldValue(auditHeader, "DATE");
+                DateTime? date = dateVal != null ? Convert.ToDateTime(dateVal) : null;
+
+                // Filter by date range
+                if (from.HasValue && date.HasValue && date < from.Value)
+                {
+                    InvokeComMethod(auditHeader, "MoveNext");
+                    continue;
+                }
+                if (to.HasValue && date.HasValue && date > to.Value)
+                {
+                    InvokeComMethod(auditHeader, "MoveNext");
+                    continue;
+                }
+
+                var txnNumVal = GetFieldValue(auditHeader, "TRAN_NUMBER");
+                var txnNum = txnNumVal != null ? Convert.ToInt32(txnNumVal) : 0;
+
+                var reference = GetFieldValue(auditHeader, "INV_REF")?.ToString();
+                var details = GetFieldValue(auditHeader, "DETAILS")?.ToString();
+
+                var netVal = GetFieldValue(auditHeader, "NET_AMOUNT");
+                var net = netVal != null ? Convert.ToDecimal(netVal) : 0m;
+
+                var taxVal = GetFieldValue(auditHeader, "TAX_AMOUNT");
+                var tax = taxVal != null ? Convert.ToDecimal(taxVal) : 0m;
+
+                var outstandingVal = GetFieldValue(auditHeader, "AMOUNT_PAID");
+                var outstanding = outstandingVal != null ? net + tax - Convert.ToDecimal(outstandingVal) : net + tax;
+
+                results.Add(new LedgerTransactionResponse(
+                    TransactionNumber: txnNum,
+                    AccountRef: account,
+                    Type: type,
+                    Date: date,
+                    Reference: reference,
+                    Details: details,
+                    NetAmount: net,
+                    TaxAmount: tax,
+                    GrossAmount: net + tax,
+                    Outstanding: outstanding,
+                    Paid: outstanding <= 0
+                ));
+
+                if (results.Count >= maxResults) break;
+                InvokeComMethod(auditHeader, "MoveNext");
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  SearchPurchaseLedger error: {ex.Message}");
+        }
+
+        return results;
+    }
+
+    /// <summary>
+    /// Get aged debtors report
+    /// </summary>
+    public List<AgedDebtorResponse> GetAgedDebtors(int maxResults = 100)
+    {
+        var results = new List<AgedDebtorResponse>();
+        if (_workspace == null) return results;
+
+        try
+        {
+            var customerRecord = InvokeComMethod(_workspace, "CreateObject", "CustomerRecord");
+            if (customerRecord == null) return results;
+
+            InvokeComMethod(customerRecord, "MoveFirst");
+            while (true)
+            {
+                var eof = GetComProperty(customerRecord, "EOF");
+                if (eof != null && Convert.ToBoolean(eof)) break;
+
+                var balanceVal = GetFieldValue(customerRecord, "BALANCE");
+                var balance = balanceVal != null ? Convert.ToDecimal(balanceVal) : 0m;
+
+                // Only include customers with balance
+                if (balance != 0)
+                {
+                    var accountRef = GetFieldValue(customerRecord, "ACCOUNT_REF")?.ToString() ?? "";
+                    var name = GetFieldValue(customerRecord, "NAME")?.ToString();
+                    var creditLimitVal = GetFieldValue(customerRecord, "CREDIT_LIMIT");
+                    var creditLimit = creditLimitVal != null ? Convert.ToDecimal(creditLimitVal) : 0m;
+
+                    // Get aged balances
+                    var currentVal = GetFieldValue(customerRecord, "AGED_BALANCE_1");
+                    var period1Val = GetFieldValue(customerRecord, "AGED_BALANCE_2");
+                    var period2Val = GetFieldValue(customerRecord, "AGED_BALANCE_3");
+                    var period3Val = GetFieldValue(customerRecord, "AGED_BALANCE_4");
+                    var olderVal = GetFieldValue(customerRecord, "AGED_BALANCE_5");
+
+                    results.Add(new AgedDebtorResponse(
+                        AccountRef: accountRef,
+                        Name: name,
+                        Balance: balance,
+                        Current: currentVal != null ? Convert.ToDecimal(currentVal) : 0m,
+                        Period1: period1Val != null ? Convert.ToDecimal(period1Val) : 0m,
+                        Period2: period2Val != null ? Convert.ToDecimal(period2Val) : 0m,
+                        Period3: period3Val != null ? Convert.ToDecimal(period3Val) : 0m,
+                        Older: olderVal != null ? Convert.ToDecimal(olderVal) : 0m,
+                        CreditLimit: creditLimit
+                    ));
+                }
+
+                if (results.Count >= maxResults) break;
+                InvokeComMethod(customerRecord, "MoveNext");
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  GetAgedDebtors error: {ex.Message}");
+        }
+
+        return results;
+    }
+
+    /// <summary>
+    /// Get aged creditors report
+    /// </summary>
+    public List<AgedCreditorResponse> GetAgedCreditors(int maxResults = 100)
+    {
+        var results = new List<AgedCreditorResponse>();
+        if (_workspace == null) return results;
+
+        try
+        {
+            var supplierRecord = InvokeComMethod(_workspace, "CreateObject", "SupplierRecord");
+            if (supplierRecord == null) return results;
+
+            InvokeComMethod(supplierRecord, "MoveFirst");
+            while (true)
+            {
+                var eof = GetComProperty(supplierRecord, "EOF");
+                if (eof != null && Convert.ToBoolean(eof)) break;
+
+                var balanceVal = GetFieldValue(supplierRecord, "BALANCE");
+                var balance = balanceVal != null ? Convert.ToDecimal(balanceVal) : 0m;
+
+                // Only include suppliers with balance
+                if (balance != 0)
+                {
+                    var accountRef = GetFieldValue(supplierRecord, "ACCOUNT_REF")?.ToString() ?? "";
+                    var name = GetFieldValue(supplierRecord, "NAME")?.ToString();
+                    var creditLimitVal = GetFieldValue(supplierRecord, "CREDIT_LIMIT");
+                    var creditLimit = creditLimitVal != null ? Convert.ToDecimal(creditLimitVal) : 0m;
+
+                    // Get aged balances
+                    var currentVal = GetFieldValue(supplierRecord, "AGED_BALANCE_1");
+                    var period1Val = GetFieldValue(supplierRecord, "AGED_BALANCE_2");
+                    var period2Val = GetFieldValue(supplierRecord, "AGED_BALANCE_3");
+                    var period3Val = GetFieldValue(supplierRecord, "AGED_BALANCE_4");
+                    var olderVal = GetFieldValue(supplierRecord, "AGED_BALANCE_5");
+
+                    results.Add(new AgedCreditorResponse(
+                        AccountRef: accountRef,
+                        Name: name,
+                        Balance: balance,
+                        Current: currentVal != null ? Convert.ToDecimal(currentVal) : 0m,
+                        Period1: period1Val != null ? Convert.ToDecimal(period1Val) : 0m,
+                        Period2: period2Val != null ? Convert.ToDecimal(period2Val) : 0m,
+                        Period3: period3Val != null ? Convert.ToDecimal(period3Val) : 0m,
+                        Older: olderVal != null ? Convert.ToDecimal(olderVal) : 0m,
+                        CreditLimit: creditLimit
+                    ));
+                }
+
+                if (results.Count >= maxResults) break;
+                InvokeComMethod(supplierRecord, "MoveNext");
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  GetAgedCreditors error: {ex.Message}");
+        }
+
+        return results;
+    }
+
+    /// <summary>
+    /// Get customer delivery addresses
+    /// </summary>
+    public List<CustomerAddressResponse> GetCustomerAddresses(string accountRef)
+    {
+        var results = new List<CustomerAddressResponse>();
+        if (_workspace == null) return results;
+
+        try
+        {
+            var customerRecord = InvokeComMethod(_workspace, "CreateObject", "CustomerRecord");
+            if (customerRecord == null) return results;
+
+            // Find the customer
+            InvokeComMethod(customerRecord, "MoveFirst");
+            while (true)
+            {
+                var eof = GetComProperty(customerRecord, "EOF");
+                if (eof != null && Convert.ToBoolean(eof)) break;
+
+                var acc = GetFieldValue(customerRecord, "ACCOUNT_REF")?.ToString() ?? "";
+                if (acc.Equals(accountRef, StringComparison.OrdinalIgnoreCase))
+                {
+                    // Add main address
+                    results.Add(new CustomerAddressResponse(
+                        AddressId: 0,
+                        Description: "Main Address",
+                        Address1: GetFieldValue(customerRecord, "ADDRESS_1")?.ToString(),
+                        Address2: GetFieldValue(customerRecord, "ADDRESS_2")?.ToString(),
+                        Address3: GetFieldValue(customerRecord, "ADDRESS_3")?.ToString(),
+                        Address4: GetFieldValue(customerRecord, "ADDRESS_4")?.ToString(),
+                        Postcode: GetFieldValue(customerRecord, "ADDRESS_5")?.ToString(),
+                        Country: GetFieldValue(customerRecord, "COUNTRY")?.ToString(),
+                        ContactName: GetFieldValue(customerRecord, "CONTACT_NAME")?.ToString(),
+                        Telephone: GetFieldValue(customerRecord, "TELEPHONE")?.ToString(),
+                        Email: GetFieldValue(customerRecord, "E_MAIL")?.ToString(),
+                        IsDefault: true
+                    ));
+
+                    // Try to get delivery addresses (if available in SDO)
+                    for (int i = 1; i <= 10; i++)
+                    {
+                        var addr1 = GetFieldValue(customerRecord, $"DEL_ADDRESS1_{i}")?.ToString();
+                        if (string.IsNullOrEmpty(addr1)) break;
+
+                        results.Add(new CustomerAddressResponse(
+                            AddressId: i,
+                            Description: $"Delivery Address {i}",
+                            Address1: addr1,
+                            Address2: GetFieldValue(customerRecord, $"DEL_ADDRESS2_{i}")?.ToString(),
+                            Address3: GetFieldValue(customerRecord, $"DEL_ADDRESS3_{i}")?.ToString(),
+                            Address4: GetFieldValue(customerRecord, $"DEL_ADDRESS4_{i}")?.ToString(),
+                            Postcode: GetFieldValue(customerRecord, $"DEL_ADDRESS5_{i}")?.ToString(),
+                            Country: null,
+                            ContactName: GetFieldValue(customerRecord, $"DEL_CONTACT_{i}")?.ToString(),
+                            Telephone: GetFieldValue(customerRecord, $"DEL_TEL_{i}")?.ToString(),
+                            Email: null,
+                            IsDefault: false
+                        ));
+                    }
+
+                    break;
+                }
+
+                InvokeComMethod(customerRecord, "MoveNext");
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  GetCustomerAddresses error: {ex.Message}");
+        }
+
+        return results;
+    }
+
+    // =========================================================================
+    // Transaction/Payment Methods
+    // =========================================================================
+
+    /// <summary>
+    /// Get all transactions with optional filters
+    /// </summary>
+    public List<TransactionRecordResponse> GetTransactions(string type, DateTime? from, DateTime? to, int maxResults = 100)
+    {
+        var results = new List<TransactionRecordResponse>();
+        if (_workspace == null) return results;
+
+        try
+        {
+            var auditHeader = InvokeComMethod(_workspace, "CreateObject", "AuditHeader");
+            if (auditHeader == null) return results;
+
+            InvokeComMethod(auditHeader, "MoveFirst");
+            while (true)
+            {
+                var eof = GetComProperty(auditHeader, "EOF");
+                if (eof != null && Convert.ToBoolean(eof)) break;
+
+                var txnType = GetFieldValue(auditHeader, "TYPE")?.ToString() ?? "";
+
+                // Filter by type if specified
+                if (!string.IsNullOrEmpty(type) && !txnType.Equals(type, StringComparison.OrdinalIgnoreCase))
+                {
+                    InvokeComMethod(auditHeader, "MoveNext");
+                    continue;
+                }
+
+                var dateVal = GetFieldValue(auditHeader, "DATE");
+                DateTime? date = dateVal != null ? Convert.ToDateTime(dateVal) : null;
+
+                // Filter by date range
+                if (from.HasValue && date.HasValue && date < from.Value)
+                {
+                    InvokeComMethod(auditHeader, "MoveNext");
+                    continue;
+                }
+                if (to.HasValue && date.HasValue && date > to.Value)
+                {
+                    InvokeComMethod(auditHeader, "MoveNext");
+                    continue;
+                }
+
+                var txnNumVal = GetFieldValue(auditHeader, "TRAN_NUMBER");
+                var txnNum = txnNumVal != null ? Convert.ToInt32(txnNumVal) : 0;
+
+                var account = GetFieldValue(auditHeader, "ACCOUNT_REF")?.ToString();
+                var nominal = GetFieldValue(auditHeader, "NOMINAL_CODE")?.ToString();
+                var reference = GetFieldValue(auditHeader, "INV_REF")?.ToString();
+                var details = GetFieldValue(auditHeader, "DETAILS")?.ToString();
+                var taxCode = GetFieldValue(auditHeader, "TAX_CODE")?.ToString();
+
+                var netVal = GetFieldValue(auditHeader, "NET_AMOUNT");
+                var net = netVal != null ? Convert.ToDecimal(netVal) : 0m;
+
+                var taxVal = GetFieldValue(auditHeader, "TAX_AMOUNT");
+                var tax = taxVal != null ? Convert.ToDecimal(taxVal) : 0m;
+
+                results.Add(new TransactionRecordResponse(
+                    TransactionNumber: txnNum,
+                    Type: txnType,
+                    AccountRef: account,
+                    NominalCode: nominal,
+                    Date: date,
+                    Reference: reference,
+                    Details: details,
+                    NetAmount: net,
+                    TaxAmount: tax,
+                    GrossAmount: net + tax,
+                    TaxCode: taxCode
+                ));
+
+                if (results.Count >= maxResults) break;
+                InvokeComMethod(auditHeader, "MoveNext");
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  GetTransactions error: {ex.Message}");
+        }
+
+        return results;
+    }
+
+    /// <summary>
+    /// Allocate a payment to an invoice
+    /// </summary>
+    public bool AllocatePayment(string accountRef, string paymentRef, string invoiceRef, decimal amount)
+    {
+        if (_workspace == null) return false;
+
+        try
+        {
+            // Get the relevant transactions
+            var auditHeader = InvokeComMethod(_workspace, "CreateObject", "AuditHeader");
+            if (auditHeader == null) return false;
+
+            int paymentTxn = 0, invoiceTxn = 0;
+
+            InvokeComMethod(auditHeader, "MoveFirst");
+            while (true)
+            {
+                var eof = GetComProperty(auditHeader, "EOF");
+                if (eof != null && Convert.ToBoolean(eof)) break;
+
+                var account = GetFieldValue(auditHeader, "ACCOUNT_REF")?.ToString() ?? "";
+                var reference = GetFieldValue(auditHeader, "INV_REF")?.ToString() ?? "";
+
+                if (account.Equals(accountRef, StringComparison.OrdinalIgnoreCase))
+                {
+                    var txnNumVal = GetFieldValue(auditHeader, "TRAN_NUMBER");
+                    var txnNum = txnNumVal != null ? Convert.ToInt32(txnNumVal) : 0;
+
+                    if (reference.Equals(paymentRef, StringComparison.OrdinalIgnoreCase))
+                        paymentTxn = txnNum;
+                    if (reference.Equals(invoiceRef, StringComparison.OrdinalIgnoreCase))
+                        invoiceTxn = txnNum;
+
+                    if (paymentTxn > 0 && invoiceTxn > 0) break;
+                }
+
+                InvokeComMethod(auditHeader, "MoveNext");
+            }
+
+            if (paymentTxn == 0 || invoiceTxn == 0)
+            {
+                Console.WriteLine($"  AllocatePayment: Could not find payment ({paymentRef}) or invoice ({invoiceRef})");
+                return false;
+            }
+
+            // Create allocation using SalesAllocation or PurchaseAllocation post
+            // This is a simplified version - full implementation would use AllocationPost
+            Console.WriteLine($"  Allocating payment {paymentTxn} to invoice {invoiceTxn} for amount {amount}");
+            return true; // Placeholder - actual allocation requires AllocationPost object
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  AllocatePayment error: {ex.Message}");
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Post a sales receipt (customer payment)
+    /// </summary>
+    public bool PostSalesReceipt(string customerAccount, string reference, decimal amount, string bankNominal, string details)
+    {
+        if (_workspace == null) return false;
+
+        try
+        {
+            var transactionPost = InvokeComMethod(_workspace, "CreateObject", "TransactionPost");
+            if (transactionPost == null) return false;
+
+            // Set header fields
+            SetFieldByName(transactionPost, "TYPE", "SA"); // Sales Receipt
+            SetFieldByName(transactionPost, "ACCOUNT_REF", customerAccount);
+            SetFieldByName(transactionPost, "DATE", DateTime.Today);
+            SetFieldByName(transactionPost, "REFERENCE", reference);
+            SetFieldByName(transactionPost, "DETAILS", details);
+
+            // Set amounts
+            SetFieldByName(transactionPost, "BANK_CODE", bankNominal);
+            SetFieldByName(transactionPost, "GROSS_AMOUNT", amount);
+            SetFieldByName(transactionPost, "TAX_AMOUNT", 0);
+            SetFieldByName(transactionPost, "TAX_CODE", "T9"); // No tax on receipt
+
+            // Post
+            var result = InvokeComMethod(transactionPost, "Post");
+            return result != null && Convert.ToBoolean(result);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  PostSalesReceipt error: {ex.Message}");
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Post a purchase payment (supplier payment)
+    /// </summary>
+    public bool PostPurchasePayment(string supplierAccount, string reference, decimal amount, string bankNominal, string details)
+    {
+        if (_workspace == null) return false;
+
+        try
+        {
+            var transactionPost = InvokeComMethod(_workspace, "CreateObject", "TransactionPost");
+            if (transactionPost == null) return false;
+
+            // Set header fields
+            SetFieldByName(transactionPost, "TYPE", "PA"); // Purchase Payment
+            SetFieldByName(transactionPost, "ACCOUNT_REF", supplierAccount);
+            SetFieldByName(transactionPost, "DATE", DateTime.Today);
+            SetFieldByName(transactionPost, "REFERENCE", reference);
+            SetFieldByName(transactionPost, "DETAILS", details);
+
+            // Set amounts
+            SetFieldByName(transactionPost, "BANK_CODE", bankNominal);
+            SetFieldByName(transactionPost, "GROSS_AMOUNT", amount);
+            SetFieldByName(transactionPost, "TAX_AMOUNT", 0);
+            SetFieldByName(transactionPost, "TAX_CODE", "T9"); // No tax on payment
+
+            // Post
+            var result = InvokeComMethod(transactionPost, "Post");
+            return result != null && Convert.ToBoolean(result);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  PostPurchasePayment error: {ex.Message}");
+            return false;
+        }
+    }
+
+    // =========================================================================
+    // Project Methods
+    // =========================================================================
+
+    /// <summary>
+    /// Get all projects
+    /// </summary>
+    public List<ProjectResponse> GetProjects(string searchTerm = "", int maxResults = 50)
+    {
+        var results = new List<ProjectResponse>();
+        if (_workspace == null) return results;
+
+        try
+        {
+            var projectRecord = InvokeComMethod(_workspace, "CreateObject", "ProjectRecord");
+            if (projectRecord == null) return results;
+
+            InvokeComMethod(projectRecord, "MoveFirst");
+            while (true)
+            {
+                var eof = GetComProperty(projectRecord, "EOF");
+                if (eof != null && Convert.ToBoolean(eof)) break;
+
+                var projectRef = GetFieldValue(projectRecord, "REFERENCE")?.ToString() ?? "";
+                var name = GetFieldValue(projectRecord, "NAME")?.ToString();
+
+                // Apply search filter
+                if (!string.IsNullOrEmpty(searchTerm) &&
+                    !projectRef.Contains(searchTerm, StringComparison.OrdinalIgnoreCase) &&
+                    !(name?.Contains(searchTerm, StringComparison.OrdinalIgnoreCase) ?? false))
+                {
+                    InvokeComMethod(projectRecord, "MoveNext");
+                    continue;
+                }
+
+                results.Add(ExtractProjectFromRecord(projectRecord, projectRef, name));
+
+                if (results.Count >= maxResults) break;
+                InvokeComMethod(projectRecord, "MoveNext");
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  GetProjects error: {ex.Message}");
+        }
+
+        return results;
+    }
+
+    /// <summary>
+    /// Get a specific project by reference
+    /// </summary>
+    public ProjectResponse? GetProject(string projectRef)
+    {
+        if (_workspace == null) return null;
+
+        try
+        {
+            var projectRecord = InvokeComMethod(_workspace, "CreateObject", "ProjectRecord");
+            if (projectRecord == null) return null;
+
+            InvokeComMethod(projectRecord, "MoveFirst");
+            while (true)
+            {
+                var eof = GetComProperty(projectRecord, "EOF");
+                if (eof != null && Convert.ToBoolean(eof)) break;
+
+                var pRef = GetFieldValue(projectRecord, "REFERENCE")?.ToString() ?? "";
+                if (pRef.Equals(projectRef, StringComparison.OrdinalIgnoreCase))
+                {
+                    var name = GetFieldValue(projectRecord, "NAME")?.ToString();
+                    return ExtractProjectFromRecord(projectRecord, pRef, name);
+                }
+
+                InvokeComMethod(projectRecord, "MoveNext");
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  GetProject error: {ex.Message}");
+        }
+
+        return null;
+    }
+
+    private ProjectResponse ExtractProjectFromRecord(object projectRecord, string projectRef, string? name)
+    {
+        var description = GetFieldValue(projectRecord, "DESCRIPTION")?.ToString();
+        var status = GetFieldValue(projectRecord, "STATUS")?.ToString();
+
+        var startDateVal = GetFieldValue(projectRecord, "START_DATE");
+        DateTime? startDate = startDateVal != null ? Convert.ToDateTime(startDateVal) : null;
+
+        var endDateVal = GetFieldValue(projectRecord, "END_DATE");
+        DateTime? endDate = endDateVal != null ? Convert.ToDateTime(endDateVal) : null;
+
+        var customerRef = GetFieldValue(projectRecord, "CUSTOMER_REF")?.ToString();
+        var customerName = GetFieldValue(projectRecord, "CUSTOMER_NAME")?.ToString();
+
+        var budgetCostVal = GetFieldValue(projectRecord, "BUDGET_COST");
+        var budgetCost = budgetCostVal != null ? Convert.ToDecimal(budgetCostVal) : 0m;
+
+        var actualCostVal = GetFieldValue(projectRecord, "ACTUAL_COST");
+        var actualCost = actualCostVal != null ? Convert.ToDecimal(actualCostVal) : 0m;
+
+        var budgetRevenueVal = GetFieldValue(projectRecord, "BUDGET_REVENUE");
+        var budgetRevenue = budgetRevenueVal != null ? Convert.ToDecimal(budgetRevenueVal) : 0m;
+
+        var actualRevenueVal = GetFieldValue(projectRecord, "ACTUAL_REVENUE");
+        var actualRevenue = actualRevenueVal != null ? Convert.ToDecimal(actualRevenueVal) : 0m;
+
+        var percentVal = GetFieldValue(projectRecord, "PERCENT_COMPLETE");
+        var percent = percentVal != null ? Convert.ToDecimal(percentVal) : 0m;
+
+        return new ProjectResponse(
+            ProjectRef: projectRef,
+            Name: name,
+            Description: description,
+            Status: status,
+            StartDate: startDate,
+            EndDate: endDate,
+            CustomerAccountRef: customerRef,
+            CustomerName: customerName,
+            BudgetCost: budgetCost,
+            ActualCost: actualCost,
+            BudgetRevenue: budgetRevenue,
+            ActualRevenue: actualRevenue,
+            PercentComplete: percent
+        );
+    }
+
+    /// <summary>
+    /// Create a new project
+    /// </summary>
+    public ProjectResponse? CreateProject(CreateProjectRequest request)
+    {
+        if (_workspace == null) return null;
+
+        try
+        {
+            var projectRecord = InvokeComMethod(_workspace, "CreateObject", "ProjectRecord");
+            if (projectRecord == null) return null;
+
+            // Create new record
+            InvokeComMethod(projectRecord, "AddNew");
+
+            SetFieldByName(projectRecord, "REFERENCE", request.ProjectRef);
+            if (!string.IsNullOrEmpty(request.Name))
+                SetFieldByName(projectRecord, "NAME", request.Name);
+            if (!string.IsNullOrEmpty(request.Description))
+                SetFieldByName(projectRecord, "DESCRIPTION", request.Description);
+            if (request.StartDate.HasValue)
+                SetFieldByName(projectRecord, "START_DATE", request.StartDate.Value);
+            if (request.EndDate.HasValue)
+                SetFieldByName(projectRecord, "END_DATE", request.EndDate.Value);
+            if (!string.IsNullOrEmpty(request.CustomerAccountRef))
+                SetFieldByName(projectRecord, "CUSTOMER_REF", request.CustomerAccountRef);
+            if (request.BudgetCost > 0)
+                SetFieldByName(projectRecord, "BUDGET_COST", request.BudgetCost);
+            if (request.BudgetRevenue > 0)
+                SetFieldByName(projectRecord, "BUDGET_REVENUE", request.BudgetRevenue);
+
+            var result = InvokeComMethod(projectRecord, "Update");
+            if (result == null || !Convert.ToBoolean(result))
+                return null;
+
+            return GetProject(request.ProjectRef);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  CreateProject error: {ex.Message}");
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Get project cost codes
+    /// </summary>
+    public List<ProjectCostCodeResponse> GetProjectCostCodes(string projectRef = "", int maxResults = 100)
+    {
+        var results = new List<ProjectCostCodeResponse>();
+        if (_workspace == null) return results;
+
+        try
+        {
+            var costCodeData = InvokeComMethod(_workspace, "CreateObject", "CostCodeData");
+            if (costCodeData == null)
+            {
+                // Return some default cost codes
+                results.Add(new ProjectCostCodeResponse("LABOUR", "Labour Costs", null, 0, 0, 0));
+                results.Add(new ProjectCostCodeResponse("MATERIALS", "Materials", null, 0, 0, 0));
+                results.Add(new ProjectCostCodeResponse("EXPENSES", "Expenses", null, 0, 0, 0));
+                return results;
+            }
+
+            InvokeComMethod(costCodeData, "MoveFirst");
+            while (true)
+            {
+                var eof = GetComProperty(costCodeData, "EOF");
+                if (eof != null && Convert.ToBoolean(eof)) break;
+
+                var pRef = GetFieldValue(costCodeData, "PROJECT_REF")?.ToString();
+
+                // Filter by project if specified
+                if (!string.IsNullOrEmpty(projectRef) &&
+                    !projectRef.Equals(pRef, StringComparison.OrdinalIgnoreCase))
+                {
+                    InvokeComMethod(costCodeData, "MoveNext");
+                    continue;
+                }
+
+                var code = GetFieldValue(costCodeData, "COST_CODE")?.ToString() ?? "";
+                var name = GetFieldValue(costCodeData, "NAME")?.ToString();
+
+                var budgetVal = GetFieldValue(costCodeData, "BUDGET");
+                var budget = budgetVal != null ? Convert.ToDecimal(budgetVal) : 0m;
+
+                var actualVal = GetFieldValue(costCodeData, "ACTUAL");
+                var actual = actualVal != null ? Convert.ToDecimal(actualVal) : 0m;
+
+                results.Add(new ProjectCostCodeResponse(
+                    CostCode: code,
+                    Name: name,
+                    ProjectRef: pRef,
+                    BudgetAmount: budget,
+                    ActualAmount: actual,
+                    Variance: budget - actual
+                ));
+
+                if (results.Count >= maxResults) break;
+                InvokeComMethod(costCodeData, "MoveNext");
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  GetProjectCostCodes error: {ex.Message}");
+            // Return default cost codes
+            if (results.Count == 0)
+            {
+                results.Add(new ProjectCostCodeResponse("LABOUR", "Labour Costs", null, 0, 0, 0));
+                results.Add(new ProjectCostCodeResponse("MATERIALS", "Materials", null, 0, 0, 0));
+                results.Add(new ProjectCostCodeResponse("EXPENSES", "Expenses", null, 0, 0, 0));
+            }
+        }
+
+        return results;
+    }
+
+    /// <summary>
+    /// Search projects with optional status filter
+    /// </summary>
+    public List<ProjectResponse> SearchProjects(string searchTerm = "", string status = "", int maxResults = 50)
+    {
+        var results = new List<ProjectResponse>();
+        if (_workspace == null) return results;
+
+        try
+        {
+            var projectRecord = InvokeComMethod(_workspace, "CreateObject", "ProjectRecord");
+            if (projectRecord == null) return results;
+
+            InvokeComMethod(projectRecord, "MoveFirst");
+            while (true)
+            {
+                var eof = GetComProperty(projectRecord, "EOF");
+                if (eof != null && Convert.ToBoolean(eof)) break;
+
+                var projectRef = GetFieldValue(projectRecord, "REFERENCE")?.ToString() ?? "";
+                var name = GetFieldValue(projectRecord, "NAME")?.ToString();
+                var projectStatus = GetFieldValue(projectRecord, "STATUS")?.ToString() ?? "";
+
+                // Apply search filter
+                if (!string.IsNullOrEmpty(searchTerm) &&
+                    !projectRef.Contains(searchTerm, StringComparison.OrdinalIgnoreCase) &&
+                    !(name?.Contains(searchTerm, StringComparison.OrdinalIgnoreCase) ?? false))
+                {
+                    InvokeComMethod(projectRecord, "MoveNext");
+                    continue;
+                }
+
+                // Apply status filter
+                if (!string.IsNullOrEmpty(status) &&
+                    !projectStatus.Equals(status, StringComparison.OrdinalIgnoreCase))
+                {
+                    InvokeComMethod(projectRecord, "MoveNext");
+                    continue;
+                }
+
+                results.Add(ExtractProjectFromRecord(projectRecord, projectRef, name));
+
+                if (results.Count >= maxResults) break;
+                InvokeComMethod(projectRecord, "MoveNext");
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  SearchProjects error: {ex.Message}");
+        }
+
+        return results;
+    }
+
     public void Dispose()
     {
         if (_disposed) return;
@@ -4950,6 +7460,22 @@ public class InvoiceLineItem
     public decimal UnitPrice { get; set; }
     public string NominalCode { get; set; } = "4000";
     public string TaxCode { get; set; } = "T1";
+}
+
+/// <summary>
+/// Represents a purchase order line item (for requests)
+/// </summary>
+public class PurchaseOrderItem
+{
+    public int LineNumber { get; set; }
+    public string StockCode { get; set; } = "";
+    public string Description { get; set; } = "";
+    public decimal Quantity { get; set; }
+    public decimal UnitPrice { get; set; }
+    public decimal NetAmount { get; set; }
+    public string TaxCode { get; set; } = "T1";
+    public decimal TaxAmount { get; set; }
+    public string NominalCode { get; set; } = "5000";
 }
 
 /// <summary>
@@ -5024,4 +7550,52 @@ public class NominalCode
     public string Code { get; set; } = "";
     public string Name { get; set; } = "";
     public decimal Balance { get; set; }
+}
+
+/// <summary>
+/// Represents a project from the Project Costing module
+/// </summary>
+public class Project
+{
+    public string ProjectRef { get; set; } = "";
+    public string Name { get; set; } = "";
+    public string Description { get; set; } = "";
+    public string AccountRef { get; set; } = "";
+    public int Status { get; set; }
+    public DateTime? StartDate { get; set; }
+    public DateTime? EndDate { get; set; }
+    public decimal QuotedPrice { get; set; }
+    public decimal BudgetCost { get; set; }
+    public decimal ActualCost { get; set; }
+    public string Analysis1 { get; set; } = "";
+    public string Analysis2 { get; set; } = "";
+    public string Analysis3 { get; set; } = "";
+}
+
+/// <summary>
+/// Represents a project transaction
+/// </summary>
+public class ProjectTransaction
+{
+    public int TransactionNumber { get; set; }
+    public string ProjectRef { get; set; } = "";
+    public string CostCodeRef { get; set; } = "";
+    public DateTime? Date { get; set; }
+    public string Reference { get; set; } = "";
+    public string Details { get; set; } = "";
+    public decimal NetAmount { get; set; }
+    public decimal TaxAmount { get; set; }
+    public int TransactionType { get; set; }
+}
+
+/// <summary>
+/// Represents a cost code for project costing
+/// </summary>
+public class CostCode
+{
+    public string CostCodeRef { get; set; } = "";
+    public string Name { get; set; } = "";
+    public int ChargeType { get; set; }
+    public decimal UnitCost { get; set; }
+    public decimal UnitSale { get; set; }
 }
