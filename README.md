@@ -115,27 +115,111 @@ SageConnector.exe serve "X:\ACCDATA" manager password --port=8080
 
 ### API Endpoints
 
+#### Documentation
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | GET | `/api/swagger.json` | OpenAPI 3.0 specification |
+
+#### System & Status
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/status` | Health check and connection status |
+| GET | `/api/version` | Sage version information |
 | GET | `/api/company` | Get company information |
+
+#### Customers
+| Method | Endpoint | Description |
+|--------|----------|-------------|
 | GET | `/api/customers` | List customers (?search=&limit=) |
 | GET | `/api/customers/{ref}` | Get customer by account ref |
 | POST | `/api/customers` | Create new customer |
 | GET | `/api/customers/{ref}/exists` | Check if customer exists |
-| GET | `/api/suppliers` | List suppliers |
+| GET | `/api/customers/{ref}/addresses` | Get customer delivery addresses |
+
+#### Suppliers
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/suppliers` | List suppliers (?search=&limit=) |
 | GET | `/api/suppliers/{ref}` | Get supplier by account ref |
 | POST | `/api/suppliers` | Create new supplier |
-| POST | `/api/sales/invoice` | Post sales invoice to ledger |
-| POST | `/api/sales/credit` | Post sales credit note |
-| POST | `/api/purchases/invoice` | Post purchase invoice |
-| POST | `/api/purchases/credit` | Post purchase credit note |
+| GET | `/api/suppliers/{ref}/exists` | Check if supplier exists |
+
+#### Products & Stock
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/products` | List products (?search=&limit=) |
+| GET | `/api/products/{code}` | Get product by code |
+| POST | `/api/products` | Create new product |
+| GET | `/api/products/{code}/exists` | Check if product exists |
+| GET | `/api/products/{code}/stock` | Get stock levels |
+| PUT | `/api/products/{code}/stock` | Update stock quantity |
+
+#### Financial Setup
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/setup` | Get company setup/preferences |
+| GET | `/api/setup/financialyear` | Get financial year dates |
+| GET | `/api/taxcodes` | List tax codes |
+| GET | `/api/currencies` | List currencies |
+| GET | `/api/departments` | List departments |
+| GET | `/api/banks` | List bank accounts |
+| GET | `/api/paymentmethods` | List payment methods |
+| GET | `/api/chartofaccounts` | Full chart of accounts |
+
+#### Nominal Ledger
+| Method | Endpoint | Description |
+|--------|----------|-------------|
 | GET | `/api/nominals` | List nominal codes |
 | POST | `/api/nominals` | Create nominal code |
+| GET | `/api/nominals/{code}/exists` | Check if nominal exists |
+
+#### Sales Transactions
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/api/sales/invoice` | Post sales invoice to ledger |
+| POST | `/api/sales/credit` | Post sales credit note |
+| POST | `/api/sales/receipt` | Post sales receipt/payment |
+| POST | `/api/sales/order` | Create sales order |
+| GET | `/api/sales/orders` | List sales orders |
+| GET | `/api/sales/ledger` | Search sales ledger (?account=&from=&to=) |
+
+#### Purchase Transactions
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/api/purchases/invoice` | Post purchase invoice |
+| POST | `/api/purchases/credit` | Post purchase credit note |
+| POST | `/api/purchases/payment` | Post purchase payment |
+| POST | `/api/purchases/order` | Create purchase order |
+| GET | `/api/purchases/orders` | List purchase orders |
+| GET | `/api/purchases/ledger` | Search purchase ledger |
+
+#### Bank & Journals
+| Method | Endpoint | Description |
+|--------|----------|-------------|
 | POST | `/api/bank/payment` | Post bank payment |
 | POST | `/api/bank/receipt` | Post bank receipt |
 | POST | `/api/journals` | Post journal entry |
 | POST | `/api/journals/simple` | Post simple two-line journal |
+
+#### Aged Analysis
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/debtors` | Aged debtors report |
+| GET | `/api/creditors` | Aged creditors report |
+
+#### Transactions
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/transactions` | Query transactions (?type=&account=&from=&to=) |
+| POST | `/api/allocate` | Allocate payment to invoice |
+
+#### Projects
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/projects` | List projects (?search=&status=) |
+| GET | `/api/projects/{ref}` | Get project by reference |
+| POST | `/api/projects` | Create new project |
+| GET | `/api/projects/{ref}/costcodes` | Get project cost codes |
 
 ### Example API Calls
 
@@ -180,6 +264,32 @@ On error:
   "error": "Error message here"
 }
 ```
+
+## Test Suite
+
+A comprehensive test suite is included to validate all API endpoints:
+
+```bash
+# Build and run tests (requires API server running)
+dotnet build SageConnector.Tests
+dotnet run --project SageConnector.Tests
+```
+
+The test suite includes 58 tests covering:
+- System/Status endpoints
+- Company information
+- Customer CRUD operations
+- Supplier CRUD operations
+- Nominal codes
+- Financial setup (tax codes, currencies, departments)
+- Products and stock management
+- Sales and purchase orders
+- Sales and purchase transactions
+- Bank payments and receipts
+- Journal entries
+- Ledger search and aged analysis
+- Transaction queries
+- Projects
 
 ## Code Examples
 
